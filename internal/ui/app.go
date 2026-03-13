@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,22 +13,30 @@ import (
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/ws"
 )
 
-// --- Стили ---
+// =============================================================================
+// Стили — все цвета и отступы в одном месте
+// =============================================================================
 var (
 	headerStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("236")).
 			Foreground(lipgloss.Color("255")).
-			Bold(true).
-			PaddingLeft(1).
-			PaddingRight(1)
+			Bold(true)
 
-	activeIndicator = lipgloss.NewStyle().
+	liveStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("82")).
 			Bold(true)
 
-	inactiveIndicator = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("196")).
-				Bold(true)
+	offStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
+
+	exchFreshStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("226")).
+			Bold(true)
+
+	exchStaleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
 
 	footerStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("236")).
@@ -53,34 +62,43 @@ var (
 			Foreground(lipgloss.Color("239"))
 )
 
-// tickMsg — сообщение таймера для обновления времени в header
-type tickMsg time.Time
+// =============================================================================
+// Сообщения bubbletea
+// =============================================================================
 
-// wsMsg — входящее сообщение от WS
+type tickMsg time.Time
 type wsMsg ws.Message
 
-// Model — главная модель TUI (bubbletea)
+// SystemMsg — структура system канала от ws-server
+type SystemMsg struct {
+	ServerTs   int64 `json:"server_ts"`
+	ExchangeLatMs int64 `json:"exchange_lat_ms"`
+	Balance    struct {
+		Total    string `json:"total"`
+		Margin   string `json:"margin"`
+		Leverage string `json:"leverage"`
+	} `json:"balance"`
+}
+
+// =============================================================================
+// Model
+// =============================================================================
 type Model struct {
 	width  int
 	height int
 
-	// Header
-	connected bool
-	pingMs    int64
-	balance   string
 	clockTime time.Time
+	balance   string
+	servMs    int64
+	exchLatMs int64
+	connected bool
 
-	// Логи (rightbar)
-	logs     []string
-	logView  viewport.Model
+	logs    []string
+	logView viewport.Model
 
-	// Контент
 	contentView viewport.Model
 
-	// Footer — командная строка
 	input textinput.Model
-
-	// WS канал
 	msgCh <-chan ws.Message
 }
 
@@ -98,34 +116,32 @@ func New(msgCh <-chan ws.Message) Model {
 	}
 }
 
-// --- Init ---
+// =============================================================================
+// Init
+// =============================================================================
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		tickCmd(),
-		waitForMsg(m.msgCh),
-	)
+	return tea.Batch(tickCmd(), waitForMsg(m.msgCh))
 }
 
-// tickCmd — таймер обновления каждую секунду
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
-// waitForMsg — ждём сообщение от WS
 func waitForMsg(ch <-chan ws.Message) tea.Cmd {
 	return func() tea.Msg {
 		return wsMsg(<-ch)
 	}
 }
 
-// --- Update ---
+// =============================================================================
+// Update
+// =============================================================================
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -159,27 +175,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// handleWS обрабатывает входящие WS сообщения
 func (m *Model) handleWS(msg ws.Message) {
 	m.connected = true
+
 	switch msg.Channel {
+	case "system":
+		var sys SystemMsg
+		if err := json.Unmarshal(msg.Data, &sys); err != nil {
+			return
+		}
+		m.servMs = time.Now().UnixMilli() - sys.ServerTs
+		m.exchLatMs = sys.ExchangeLatMs
+		if sys.Balance.Total != "" {
+			m.balance = fmt.Sprintf("$%.2f USDT", parseFloat(sys.Balance.Total))
+		}
 	case "trades":
 		m.addLog(fmt.Sprintf("💹 trade %s", msg.Symbol))
 	case "stats":
 		m.addLog(fmt.Sprintf("📊 stats %s", msg.Symbol))
 	case "liquidations":
-		m.addLog(fmt.Sprintf("💥 liquidation %s", msg.Symbol))
+		m.addLog(fmt.Sprintf("💥 LIQ %s", msg.Symbol))
 	case "candles":
 		m.addLog(fmt.Sprintf("🕯️ candle %s", msg.Symbol))
 	}
 }
 
-// addLog добавляет строку в лог с временной меткой
+func parseFloat(s string) float64 {
+	var f float64
+	fmt.Sscanf(s, "%f", &f)
+	return f
+}
+
 func (m *Model) addLog(entry string) {
 	ts := logTimeStyle.Render(time.Now().Format("15:04:05"))
 	line := fmt.Sprintf("%s %s", ts, logEntryStyle.Render(entry))
 	m.logs = append(m.logs, line)
-	// храним последние 200 строк
 	if len(m.logs) > 200 {
 		m.logs = m.logs[len(m.logs)-200:]
 	}
@@ -187,14 +217,10 @@ func (m *Model) addLog(entry string) {
 	m.logView.GotoBottom()
 }
 
-// recalcSizes пересчитывает размеры панелей при изменении окна
 func (m *Model) recalcSizes() {
-	headerH := 1
-	footerH := 3
 	rightbarW := 35
-
 	contentW := m.width - rightbarW - 4
-	contentH := m.height - headerH - footerH - 4
+	contentH := m.height - 1 - 3 - 4 // header + footer + borders
 
 	m.contentView = viewport.New(contentW, contentH)
 	m.contentView.SetContent("📊 Dashboard\n\nДанные загружаются...")
@@ -203,12 +229,13 @@ func (m *Model) recalcSizes() {
 	m.logView.SetContent("")
 }
 
-// --- View ---
+// =============================================================================
+// View
+// =============================================================================
 func (m Model) View() string {
 	if m.width == 0 {
 		return "загрузка..."
 	}
-
 	return strings.Join([]string{
 		m.renderHeader(),
 		m.renderMain(),
@@ -216,39 +243,50 @@ func (m Model) View() string {
 	}, "\n")
 }
 
-// renderHeader — одна строка с названием, временем, балансом, индикатором
+// renderHeader — одна строка на всю ширину:
+// [название]   [время UTC]   [баланс]   [● SERV Xms  ● EXCH Xs]
 func (m Model) renderHeader() string {
-	// Левая часть
-	left := headerStyle.Render("⚡ DTrader 6  v0.1")
+	title   := "⚡ DTrader 6  v0.1"
+	clock   := m.clockTime.UTC().Format("15:04:05 UTC")
+	balance := fmt.Sprintf("💰 %s", m.balance)
 
-	// Время биржи (UTC)
-	clock := headerStyle.Render(m.clockTime.UTC().Format("15:04:05 UTC"))
-
-	// Баланс
-	balance := headerStyle.Render(fmt.Sprintf("💰 %s", m.balance))
-
-	// Индикатор связи
-	var indicator string
-	if m.connected {
-		indicator = headerStyle.Render(activeIndicator.Render("● LIVE"))
+	// SERV — latency между TUI и ws-server
+	var serv string
+	if !m.connected {
+		serv = offStyle.Render("● SERV OFF")
+	} else if m.servMs < 100 {
+		serv = liveStyle.Render(fmt.Sprintf("● SERV %dms", m.servMs))
 	} else {
-		indicator = headerStyle.Render(inactiveIndicator.Render("● OFF"))
+		serv = exchFreshStyle.Render(fmt.Sprintf("● SERV %dms", m.servMs))
 	}
 
-	// Заполняем пространство между элементами
-	usedW := lipgloss.Width(left) + lipgloss.Width(clock) +
-		lipgloss.Width(balance) + lipgloss.Width(indicator)
-	gap := m.width - usedW
-	if gap < 0 {
-		gap = 0
+	// EXCH — свежесть последнего pong от биржи
+	var exch string
+	if m.exchLatMs == 0 {
+		exch = offStyle.Render("● EXCH OFF")
+	} else if m.exchLatMs < 300 {
+		exch = exchFreshStyle.Render(fmt.Sprintf("● EXCH %dms", m.exchLatMs))
+	} else {
+		exch = exchStaleStyle.Render(fmt.Sprintf("● EXCH %dms!", m.exchLatMs))
 	}
-	spacer := headerStyle.Render(strings.Repeat(" ", gap))
 
-	return lipgloss.JoinHorizontal(lipgloss.Top,
-		left, spacer, clock, balance, indicator)
+	// Оба индикатора рядом — прижаты к правому краю
+	indicators := serv + "  " + exch
+
+	// Считаем пробелы для равномерного распределения 4 блоков
+	usedW := len(title) + len(clock) + len(balance) +
+		lipgloss.Width(indicators)
+	totalGap := m.width - usedW - 2 // -2 небольшой запас
+	if totalGap < 4 {
+		totalGap = 4
+	}
+	gap := strings.Repeat(" ", totalGap/3)
+
+	line := title + gap + clock + gap + balance + gap + indicators
+	return headerStyle.Width(m.width).Render(line)
 }
 
-// renderMain — основной контент + rightbar логи
+// renderMain — контент слева + логи справа
 func (m Model) renderMain() string {
 	rightbarW := 35
 	contentW := m.width - rightbarW - 4
@@ -268,8 +306,7 @@ func (m Model) renderMain() string {
 
 // renderFooter — командная строка
 func (m Model) renderFooter() string {
-	prompt := footerStyle.Width(m.width).Render(
+	return footerStyle.Width(m.width).Render(
 		fmt.Sprintf("❯ %s", m.input.View()),
 	)
-	return prompt
 }
