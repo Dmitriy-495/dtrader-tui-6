@@ -258,7 +258,7 @@ func (m Model) View() string {
 // renderHeader — одна строка:
 // [название]   [время UTC]   [баланс]   [● SERV Xms  ● EXCH Xms (avg Xms)]
 func (m Model) renderHeader() string {
-	title   := "⚡ DTrader 6  v0.3"
+	title   := "⚡ DTrader 6  v0.4"
 	clock   := m.clockTime.UTC().Format("15:04:05 UTC")
 	balance := fmt.Sprintf("💰 %s", m.balance)
 
