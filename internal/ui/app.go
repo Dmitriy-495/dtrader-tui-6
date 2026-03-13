@@ -14,7 +14,7 @@ import (
 )
 
 // =============================================================================
-// Стили — все цвета и отступы в одном месте
+// Стили
 // =============================================================================
 var (
 	headerStyle = lipgloss.NewStyle().
@@ -22,20 +22,19 @@ var (
 			Foreground(lipgloss.Color("255")).
 			Bold(true)
 
+	// liveStyle — зелёный (хорошее соединение)
 	liveStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("82")).
 			Bold(true)
 
+	// offStyle — красный (нет соединения или критическая задержка)
 	offStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Bold(true)
 
-	exchFreshStyle = lipgloss.NewStyle().
+	// warnStyle — жёлтый (повышенная задержка WARNING)
+	warnStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("226")).
-			Bold(true)
-
-	exchStaleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
 			Bold(true)
 
 	footerStyle = lipgloss.NewStyle().
@@ -65,15 +64,17 @@ var (
 // =============================================================================
 // Сообщения bubbletea
 // =============================================================================
-
 type tickMsg time.Time
 type wsMsg ws.Message
 
 // SystemMsg — структура system канала от ws-server
 type SystemMsg struct {
-	ServerTs   int64 `json:"server_ts"`
-	ExchangeLatMs int64 `json:"exchange_lat_ms"`
-	Balance    struct {
+	ServerTs int64 `json:"server_ts"` // timestamp отправки (для SERV latency)
+	ExchangePing struct {
+		Current int64 `json:"current"` // текущий RTT ping-pong биржи в мс
+		Ema     int64 `json:"ema"`     // EMA латентности за ~100 измерений
+	} `json:"exchange_ping"`
+	Balance struct {
 		Total    string `json:"total"`
 		Margin   string `json:"margin"`
 		Leverage string `json:"leverage"`
@@ -87,17 +88,22 @@ type Model struct {
 	width  int
 	height int
 
-	clockTime time.Time
-	balance   string
-	servMs    int64
-	exchLatMs int64
-	connected bool
+	// Header данные
+	clockTime   time.Time // текущее время (обновляется каждую секунду)
+	balance     string    // баланс USDT
+	servMs      int64     // latency TUI → ws-server в мс
+	exchCurMs   int64     // текущий RTT биржи в мс
+	exchEmaMs   int64     // EMA RTT биржи в мс
+	connected   bool      // подключены ли к ws-server
 
+	// Логи (rightbar)
 	logs    []string
 	logView viewport.Model
 
+	// Основной контент
 	contentView viewport.Model
 
+	// Footer — командная строка
 	input textinput.Model
 	msgCh <-chan ws.Message
 }
@@ -175,6 +181,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// handleWS обрабатывает входящие сообщения по каналам
 func (m *Model) handleWS(msg ws.Message) {
 	m.connected = true
 
@@ -184,11 +191,16 @@ func (m *Model) handleWS(msg ws.Message) {
 		if err := json.Unmarshal(msg.Data, &sys); err != nil {
 			return
 		}
+		// SERV latency = разница между server_ts и текущим временем
 		m.servMs = time.Now().UnixMilli() - sys.ServerTs
-		m.exchLatMs = sys.ExchangeLatMs
+		// Латентность биржи — текущая и EMA
+		m.exchCurMs = sys.ExchangePing.Current
+		m.exchEmaMs = sys.ExchangePing.Ema
+		// Баланс
 		if sys.Balance.Total != "" {
 			m.balance = fmt.Sprintf("$%.2f USDT", parseFloat(sys.Balance.Total))
 		}
+
 	case "trades":
 		m.addLog(fmt.Sprintf("💹 trade %s", msg.Symbol))
 	case "stats":
@@ -220,7 +232,7 @@ func (m *Model) addLog(entry string) {
 func (m *Model) recalcSizes() {
 	rightbarW := 35
 	contentW := m.width - rightbarW - 4
-	contentH := m.height - 1 - 3 - 4 // header + footer + borders
+	contentH := m.height - 1 - 3 - 4
 
 	m.contentView = viewport.New(contentW, contentH)
 	m.contentView.SetContent("📊 Dashboard\n\nДанные загружаются...")
@@ -243,8 +255,8 @@ func (m Model) View() string {
 	}, "\n")
 }
 
-// renderHeader — одна строка на всю ширину:
-// [название]   [время UTC]   [баланс]   [● SERV Xms  ● EXCH Xs]
+// renderHeader — одна строка:
+// [название]   [время UTC]   [баланс]   [● SERV Xms  ● EXCH Xms (avg Xms)]
 func (m Model) renderHeader() string {
 	title   := "⚡ DTrader 6  v0.1"
 	clock   := m.clockTime.UTC().Format("15:04:05 UTC")
@@ -257,32 +269,33 @@ func (m Model) renderHeader() string {
 	} else if m.servMs < 100 {
 		serv = liveStyle.Render(fmt.Sprintf("● SERV %dms", m.servMs))
 	} else {
-		serv = exchFreshStyle.Render(fmt.Sprintf("● SERV %dms", m.servMs))
+		serv = warnStyle.Render(fmt.Sprintf("● SERV %dms", m.servMs))
 	}
 
-	// EXCH — латентность ping-pong с биржей
+	// EXCH — текущая латентность + EMA в скобках
+	// < 300ms зелёный, 300-1000ms жёлтый WARNING, >1000ms красный SOS
 	var exch string
-	if m.exchLatMs == 0 {
-		// нет данных
+	if m.exchCurMs == 0 {
+		// Нет данных от биржи
 		exch = offStyle.Render("● EXCH OFF")
-	} else if m.exchLatMs < 300 {
-		// < 300ms — хорошая задержка, зелёный
-		exch = liveStyle.Render(fmt.Sprintf("● EXCH %dms", m.exchLatMs))
-	} else if m.exchLatMs < 1000 {
-		// 300-1000ms — WARNING, жёлтый
-		exch = exchFreshStyle.Render(fmt.Sprintf("● EXCH %dms", m.exchLatMs))
+	} else if m.exchCurMs < 300 {
+		// Отличная задержка — зелёный
+		exch = liveStyle.Render(fmt.Sprintf("● EXCH %dms (avg %dms)", m.exchCurMs, m.exchEmaMs))
+	} else if m.exchCurMs < 1000 {
+		// Повышенная задержка — жёлтый WARNING
+		exch = warnStyle.Render(fmt.Sprintf("● EXCH %dms (avg %dms)", m.exchCurMs, m.exchEmaMs))
 	} else {
-		// > 1000ms — SOS, красный
-		exch = exchStaleStyle.Render(fmt.Sprintf("● EXCH %dms SOS", m.exchLatMs))
+		// Критическая задержка — красный SOS
+		exch = offStyle.Render(fmt.Sprintf("● EXCH %dms SOS (avg %dms)", m.exchCurMs, m.exchEmaMs))
 	}
 
 	// Оба индикатора рядом — прижаты к правому краю
 	indicators := serv + "  " + exch
 
-	// Считаем пробелы для равномерного распределения 4 блоков
+	// Равномерно распределяем 4 блока по ширине
 	usedW := len(title) + len(clock) + len(balance) +
 		lipgloss.Width(indicators)
-	totalGap := m.width - usedW - 2 // -2 небольшой запас
+	totalGap := m.width - usedW - 2
 	if totalGap < 4 {
 		totalGap = 4
 	}
@@ -310,7 +323,7 @@ func (m Model) renderMain() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, content, logs)
 }
 
-// renderFooter — командная строка
+// renderFooter — командная строка управления ботом
 func (m Model) renderFooter() string {
 	return footerStyle.Width(m.width).Render(
 		fmt.Sprintf("❯ %s", m.input.View()),
