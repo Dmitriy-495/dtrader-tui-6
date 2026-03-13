@@ -260,14 +260,20 @@ func (m Model) renderHeader() string {
 		serv = exchFreshStyle.Render(fmt.Sprintf("● SERV %dms", m.servMs))
 	}
 
-	// EXCH — свежесть последнего pong от биржи
+	// EXCH — латентность ping-pong с биржей
 	var exch string
 	if m.exchLatMs == 0 {
+		// нет данных
 		exch = offStyle.Render("● EXCH OFF")
 	} else if m.exchLatMs < 300 {
+		// < 300ms — хорошая задержка, зелёный
+		exch = liveStyle.Render(fmt.Sprintf("● EXCH %dms", m.exchLatMs))
+	} else if m.exchLatMs < 1000 {
+		// 300-1000ms — WARNING, жёлтый
 		exch = exchFreshStyle.Render(fmt.Sprintf("● EXCH %dms", m.exchLatMs))
 	} else {
-		exch = exchStaleStyle.Render(fmt.Sprintf("● EXCH %dms!", m.exchLatMs))
+		// > 1000ms — SOS, красный
+		exch = exchStaleStyle.Render(fmt.Sprintf("● EXCH %dms SOS", m.exchLatMs))
 	}
 
 	// Оба индикатора рядом — прижаты к правому краю
