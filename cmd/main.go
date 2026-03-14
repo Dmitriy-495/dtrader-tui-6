@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/config"
+	"github.com/Dmitriy-495/dtrader-tui-6/internal/news"
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/ui"
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/ws"
 )
@@ -19,19 +20,20 @@ func main() {
 
 	fmt.Println("🚀 DTrader 6 TUI запускается...")
 
-	// Создаём WS клиент
-	wsClient := ws.New(cfg.WSServerURL, cfg.APIKey)
+	// News client — тянет новости каждые 5 минут
+	newsClient := news.New(cfg.CryptoPanicKey)
+	newsClient.Start()
 
-	// Запускаем WS в фоне
+	// WS клиент
+	wsClient := ws.New(cfg.WSServerURL, cfg.APIKey)
 	go wsClient.Connect()
 
-	// Запускаем TUI
+	// TUI
 	p := tea.NewProgram(
-		ui.New(wsClient.MsgCh),
+		ui.New(wsClient.MsgCh, newsClient.UpdateCh),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
-
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Ошибка TUI: %v\n", err)
 		os.Exit(1)
