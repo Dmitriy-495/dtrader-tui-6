@@ -219,7 +219,7 @@ func joinLines(lines []string) string {
 func (m *Model) recalcSizes() {
 	rightW   := m.width * rightbarPct / 100
 	leftW    := m.width - rightW
-	mainH    := m.height - 2
+	mainH    := m.height - 4
 	newsTotal := newsContent + 2
 	vpH      := mainH - newsTotal - 3
 	if vpH < 1 {
