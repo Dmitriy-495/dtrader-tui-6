@@ -1,53 +1,52 @@
 package news
 
 import (
-	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"time"
 )
 
 const (
-	apiURL   = "https://cryptopanic.com/api/developer/v2/posts/"
+	rssURL   = "https://ru.cointelegraph.com/rss"
 	interval = 5 * time.Minute
 )
 
-// NewsItem — одна новость из CryptoPanic
+// NewsItem — одна новость
 type NewsItem struct {
-	Title       string    `json:"title"`
-	PublishedAt time.Time `json:"published_at"`
-	Source      struct {
-		Title string `json:"title"`
-	} `json:"source"`
-	Votes struct {
-		Positive int `json:"positive"`
-		Negative int `json:"negative"`
-	} `json:"votes"`
-}
-
-// response — ответ CryptoPanic API
-type response struct {
-	Results []NewsItem `json:"results"`
-}
-
-// Client — клиент CryptoPanic
-type Client struct {
-	apiKey   string
-	items    []NewsItem
-	UpdateCh chan []NewsItem
-}
-
-func New(apiKey string) *Client {
-	return &Client{
-		apiKey:   apiKey,
-		UpdateCh: make(chan []NewsItem, 1),
+	Title       string
+	PublishedAt time.Time
+	Votes       struct {
+		Positive int
+		Negative int
 	}
 }
 
-// Start — запускает фоновое обновление новостей каждые 5 минут
+// rssItem — XML структура одной новости
+type rssItem struct {
+	Title   string `xml:"title"`
+	PubDate string `xml:"pubDate"`
+}
+
+// rssFeed — XML структура RSS ленты
+type rssFeed struct {
+	Items []rssItem `xml:"channel>item"`
+}
+
+// Client — RSS клиент Cointelegraph
+type Client struct {
+	UpdateCh chan []NewsItem
+}
+
+func New(_ string) *Client {
+	return &Client{
+		UpdateCh: make(chan []NewsItem, 10),
+	}
+}
+
 func (c *Client) Start() {
 	go func() {
-		c.fetch() // сразу при старте
+		c.fetch()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -56,29 +55,32 @@ func (c *Client) Start() {
 	}()
 }
 
-// fetch — получает свежие новости по BTC/ETH/SOL
 func (c *Client) fetch() {
-	url := fmt.Sprintf("%s?auth_token=%s&currencies=BTC,ETH,SOL&kind=news&public=true",
-		apiURL, c.apiKey)
-
-	resp, err := http.Get(url)
+	resp, err := http.Get(rssURL)
 	if err != nil {
+		fmt.Printf("⚠️ RSS ошибка: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	var r response
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	var feed rssFeed
+	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
+		fmt.Printf("⚠️ RSS parse ошибка: %v\n", err)
 		return
 	}
 
-	// Берём последние 8 новостей
-	items := r.Results
-	if len(items) > 8 {
-		items = items[:8]
+	var items []NewsItem
+	for _, item := range feed.Items {
+		t, _ := time.Parse(time.RFC1123Z, item.PubDate)
+		items = append(items, NewsItem{
+			Title:       item.Title,
+			PublishedAt: t,
+		})
+		if len(items) >= 8 {
+			break
+		}
 	}
 
-	// Отправляем в канал без блокировки
 	select {
 	case c.UpdateCh <- items:
 	default:
