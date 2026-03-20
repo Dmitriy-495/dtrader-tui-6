@@ -30,7 +30,10 @@ var (
 // =============================================================================
 var (
 	// HeaderStyle — без фона, просто Bold
-	HeaderStyle = lipgloss.NewStyle().Bold(true)
+	HeaderStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Bold(true)
 
 	FooterStyle = lipgloss.NewStyle().
 			Background(colorBg).

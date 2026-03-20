@@ -7,8 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// bg — фон header, применяется ко всем вложенным элементам
-
 var (
 	hWhite  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
 	hOrange = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
@@ -19,10 +17,7 @@ var (
 )
 
 func (m Model) renderHeader() string {
-	mainH := m.height - 3
-	newsBoxH2 := 12
-	screenH := mainH - newsBoxH2
-	title    := hWhite.Render(fmt.Sprintf("  W=%d H=%d main=%d scr=%d", m.width, m.height, mainH, screenH))
+	title    := hWhite.Render("  ⚡ DTrader 6")
 	clock    := hWhite.Render(m.clockTime.UTC().Format("15:04:05 UTC"))
 	balance  := hOrange.Render(fmt.Sprintf("💰 %s", m.balance))
 	pnlDay   := hGreen.Render("↑ +$0.17 (+0.67%) 24h")

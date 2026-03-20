@@ -6,15 +6,17 @@ import (
 )
 
 const (
-	newsContent = 10
-	rightbarPct = 20
-	logsPct     = 60
+	newsContent  = 10
+	rightbarPct  = 18
+	logsPct      = 60
+	paddingRight = 4 // отступ справа чтобы бордер был виден
 )
 
 func (m Model) renderMain() string {
-	mainH  := m.height - 4
-	rightW := m.width * rightbarPct / 100
-	leftW  := m.width - rightW - 1
+	mainH  := m.height - 5
+	w      := m.width - paddingRight // рабочая ширина с отступом справа
+	rightW := w * rightbarPct / 100
+	leftW  := w - rightW - 1
 
 	left  := m.renderLeft(leftW, mainH)
 	right := m.renderRight(rightW, mainH)
@@ -23,7 +25,7 @@ func (m Model) renderMain() string {
 }
 
 func (m Model) renderLeft(w, h int) string {
-	screenH := h - newsContent - 2
+	screenH := h - newsContent - 4
 	if screenH < 1 {
 		screenH = 1
 	}
@@ -53,7 +55,7 @@ func (m Model) renderLeft(w, h int) string {
 }
 
 func (m Model) renderRight(w, h int) string {
-	total := h - 4 // logsH + posH = total, каждый блок +2 border = h
+	total := h - 4 - 4
 	logsH := total * logsPct / 100
 	posH  := total - logsH
 
