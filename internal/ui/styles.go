@@ -9,6 +9,7 @@ var (
 	colorRed    = lipgloss.Color("196")
 	colorGray   = lipgloss.Color("239")
 	colorBg     = lipgloss.Color("236")
+	colorBorder = lipgloss.Color("214")
 )
 
 var (
@@ -20,26 +21,31 @@ var (
 )
 
 var (
-	// HeaderStyle — с рамкой
 	HeaderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("238")).
+			BorderForeground(colorBorder).
 			Bold(true)
 
-	// FooterStyle — тёмный фон
 	FooterStyle = lipgloss.NewStyle().
 			Background(colorBg).
 			Foreground(colorOrange).
 			PaddingLeft(1)
 
-	// ContentStyle — без рамки, вкладки создают границу
+	// ContentStyle — только левая, правая и нижняя границы
+	// верхняя граница заменяется вкладками
 	ContentStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder).
+			BorderTop(false).
+			BorderLeft(true).
+			BorderRight(true).
+			BorderBottom(true).
 			PaddingLeft(1).
 			PaddingRight(1)
 
 	SidebarStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("238")).
+			BorderForeground(colorBorder).
 			PaddingLeft(1).
 			PaddingRight(1)
 )

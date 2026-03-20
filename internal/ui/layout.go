@@ -6,73 +6,82 @@ import (
 )
 
 const (
-	newsContent  = 10
-	rightbarPct  = 18
-	logsPct      = 60
-	paddingRight = 4 // отступ справа чтобы бордер был виден
+	newsContent = 8
+	rightbarPct = 20
+	logsPct     = 60
 )
 
+// renderMain — [content | rightbar]
 func (m Model) renderMain() string {
-	mainH  := m.height - 5
-	w      := m.width - paddingRight // рабочая ширина с отступом справа
-	rightW := w * rightbarPct / 100
-	leftW  := w - rightW - 1
+	mainH  := m.height - 5 // header(3) + footer(1) + \n(1)
+	rightW := m.width * rightbarPct / 100
+	leftW  := m.width - rightW
 
-	left  := m.renderLeft(leftW, mainH)
-	right := m.renderRight(rightW, mainH)
+	left  := m.renderContent(leftW, mainH)
+	right := m.renderRightbar(rightW, mainH)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
-func (m Model) renderLeft(w, h int) string {
-	screenH := h - newsContent - 4
-	if screenH < 1 {
-		screenH = 1
-	}
-	vpH := screenH - 2
+// renderContent — tabs + info + news
+func (m Model) renderContent(w, h int) string {
+	newsH  := newsContent + 2 // +2 border
+	tabsH  := 2               // tabs строки (без нижней границы активной)
+	infoH  := h - newsH - tabsH
+
+	// Активный экран
+	var screen string
+	vpH := infoH - 2 // -2 border left+right overhead
 	if vpH < 1 {
 		vpH = 1
 	}
-
-	var screen string
 	if m.activeTab == 0 {
 		screen = m.dashboard.Render(w-4, vpH)
 	} else if m.activeTab <= len(m.dashboard.Symbols) {
 		sym := m.dashboard.Symbols[m.activeTab-1]
-	if pm, ok := m.pairModels[sym]; ok {
-		screen = pm.Render(w-4, vpH)
-	}
+		if pm, ok := m.pairModels[sym]; ok {
+			screen = pm.Render(w-4, vpH)
+		}
 	}
 
 	vp := viewport.New(w-4, vpH)
 	vp.SetContent(screen)
 
-	screenBox := ContentStyle.
-		Width(w).
-		Height(screenH).
-		Render(m.renderTabs(w) + "\n" + vp.View())
+	// tabs section
+	tabs := m.renderTabs(w)
 
-	newsBox := m.renderNews(w, newsContent)
+	// info section — рамка без верхней границы
+	infoBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorOrange).
+		BorderTop(false).
+		Width(w - 2).
+		Height(infoH).
+		PaddingLeft(1).
+		Render(vp.View())
 
-	return lipgloss.JoinVertical(lipgloss.Left, screenBox, newsBox)
+	// news section
+	newsBox := m.renderNews(w, newsH)
+
+	return lipgloss.JoinVertical(lipgloss.Left, tabs, infoBox, newsBox)
 }
 
-func (m Model) renderRight(w, h int) string {
-	total := h - 4 - 4
+// renderRightbar — logs + positions
+func (m Model) renderRightbar(w, h int) string {
+	total := h - 4
 	logsH := total * logsPct / 100
 	posH  := total - logsH
 
 	logs := rightbarBorderStyle.
-		Width(w).
+		Width(w - 1).
 		Height(logsH).
 		Render(sectionTitleStyle.Render("📋 Logs") + "\n" + m.logView.View())
 
 	positions := rightbarBorderStyle.
-		Width(w).
+		Width(w - 1).
 		Height(posH).
 		Render(sectionTitleStyle.Render("📈 Positions") + "\n" +
 			GrayStyle.Render("  нет открытых позиций"))
 
 	return lipgloss.JoinVertical(lipgloss.Left, logs, positions)
 }
-

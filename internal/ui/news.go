@@ -11,7 +11,7 @@ import (
 
 var newsBorderStyle = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
-	BorderForeground(lipgloss.Color("238"))
+	BorderForeground(colorOrange)
 
 // renderNews — лента биржевых новостей от CryptoPanic
 func (m Model) renderNews(w, h int) string {

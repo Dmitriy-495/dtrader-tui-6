@@ -12,9 +12,6 @@ type Tab struct {
 	Index int
 }
 
-// tabBorderWithBottom — кастомный border для вкладок
-// активная вкладка: нижняя граница открыта (сливается с контентом)
-// неактивная: нижняя граница закрыта
 func tabBorderWithBottom(left, middle, right string) lipgloss.Border {
 	border := lipgloss.RoundedBorder()
 	border.BottomLeft = left
@@ -29,7 +26,7 @@ var (
 
 	inactiveTabStyle = lipgloss.NewStyle().
 				Border(inactiveTabBorder, true).
-				BorderForeground(lipgloss.Color("238")).
+				BorderForeground(colorOrange).
 				Foreground(colorGray).
 				Padding(0, 1)
 
@@ -39,6 +36,8 @@ var (
 			Foreground(colorOrange).
 			Bold(true).
 			Padding(0, 1)
+
+	tabLineStyle = lipgloss.NewStyle().Foreground(colorOrange)
 )
 
 func (m Model) buildTabs() []Tab {
@@ -81,7 +80,6 @@ func (m Model) renderTabs(w int) string {
 			style = inactiveTabStyle
 		}
 
-		// Кастомизируем угловые символы крайних вкладок
 		border, _, _, _, _ := style.GetBorder()
 		if isFirst && isActive {
 			border.BottomLeft = "│"
@@ -93,16 +91,18 @@ func (m Model) renderTabs(w int) string {
 			border.BottomRight = "┤"
 		}
 		style = style.Border(border)
-
 		rendered = append(rendered, style.Render(tab.Icon+" "+tab.Label))
 	}
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+	row  := lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+	rowW := lipgloss.Width(row)
 
-	// Добавляем подсказку справа
-	hint := lipgloss.NewStyle().Foreground(colorGray).Render("  Tab/0-5")
-	padding := strings.Repeat("─", w-lipgloss.Width(row)-lipgloss.Width(hint)-2)
-	padStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	// Линия до конца + скруглённый уголок ╮
+	lineW := w - rowW - 1
+	if lineW < 0 {
+		lineW = 0
+	}
+	line := tabLineStyle.Render(strings.Repeat("─", lineW) + "╮")
 
-	return row + padStyle.Render(padding) + hint
+	return row + line
 }
