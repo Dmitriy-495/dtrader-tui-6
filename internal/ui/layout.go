@@ -73,23 +73,3 @@ func (m Model) renderRight(w, h int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, logs, positions)
 }
 
-func (m Model) renderTabs(w int) string {
-	activeStyle   := lipgloss.NewStyle().Foreground(colorOrange).Bold(true).Underline(true)
-	inactiveStyle := lipgloss.NewStyle().Foreground(colorGray)
-
-	result := ""
-	if m.activeTab == 0 {
-		result += activeStyle.Render("[ Dashboard ]")
-	} else {
-		result += inactiveStyle.Render("  Dashboard  ")
-	}
-	for i, sym := range m.symbols {
-		if m.activeTab == i+1 {
-			result += activeStyle.Render("[ " + sym + " ]")
-		} else {
-			result += inactiveStyle.Render("  " + sym + "  ")
-		}
-	}
-	result += GrayStyle.Render("  Tab/0-5")
-	return result
-}

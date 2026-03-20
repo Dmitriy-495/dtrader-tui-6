@@ -2,9 +2,6 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// =============================================================================
-// Цветовая палитра
-// =============================================================================
 var (
 	colorOrange = lipgloss.Color("214")
 	colorGreen  = lipgloss.Color("82")
@@ -14,9 +11,6 @@ var (
 	colorBg     = lipgloss.Color("236")
 )
 
-// =============================================================================
-// Базовые стили
-// =============================================================================
 var (
 	OrangeStyle = lipgloss.NewStyle().Foreground(colorOrange).Bold(true)
 	GreenStyle  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
@@ -25,24 +19,21 @@ var (
 	GrayStyle   = lipgloss.NewStyle().Foreground(colorGray)
 )
 
-// =============================================================================
-// Стили компонентов
-// =============================================================================
 var (
-	// HeaderStyle — без фона, просто Bold
+	// HeaderStyle — с рамкой
 	HeaderStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
-		Bold(true)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("238")).
+			Bold(true)
 
+	// FooterStyle — тёмный фон
 	FooterStyle = lipgloss.NewStyle().
 			Background(colorBg).
 			Foreground(colorOrange).
 			PaddingLeft(1)
 
+	// ContentStyle — без рамки, вкладки создают границу
 	ContentStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("238")).
 			PaddingLeft(1).
 			PaddingRight(1)
 
