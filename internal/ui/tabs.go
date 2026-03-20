@@ -50,7 +50,7 @@ func (m Model) buildTabs() []Tab {
 		"ETH_USDT": "Ξ",
 		"SOL_USDT": "◎",
 	}
-	for i, sym := range m.symbols {
+	for i, sym := range m.dashboard.Symbols {
 		icon := icons[sym]
 		if icon == "" {
 			icon = "◆"

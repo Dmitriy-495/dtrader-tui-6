@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/news"
+	"github.com/Dmitriy-495/dtrader-tui-6/internal/ui/screens"
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/ws"
 )
 
@@ -52,10 +53,14 @@ type StatsMsg struct {
 	LsrAccount      float64 `json:"lsr_account"`
 }
 
+// =============================================================================
+// Model — главная модель (оркестратор)
+// =============================================================================
 type Model struct {
 	width  int
 	height int
 
+	// Header
 	clockTime time.Time
 	balance   string
 	servMs    int64
@@ -63,16 +68,21 @@ type Model struct {
 	exchEmaMs int64
 	connected bool
 
+	// Вкладки
 	activeTab int
-	symbols   []string
-	pairs     map[string]*PairData
+
+	// Экраны — дочерние модели
+	dashboard  screens.DashboardModel
+	pairModels map[string]screens.PairModel
+
+	// Новости
 	newsItems []news.NewsItem
 
+	// Логи (rightbar)
 	logs    []string
 	logView viewport.Model
 
-	contentView viewport.Model
-
+	// Footer
 	input  textinput.Model
 	msgCh  <-chan ws.Message
 	newsCh <-chan []news.NewsItem
@@ -83,17 +93,20 @@ func New(msgCh <-chan ws.Message, newsCh <-chan []news.NewsItem) Model {
 	input.Placeholder = "введите команду..."
 	input.Focus()
 	return Model{
-		msgCh:     msgCh,
-		newsCh:    newsCh,
-		balance:   "загрузка...",
-		clockTime: time.Now(),
-		input:     input,
-		logs:      []string{},
-		pairs:     make(map[string]*PairData),
-		symbols:   []string{},
+		msgCh:      msgCh,
+		newsCh:     newsCh,
+		balance:    "загрузка...",
+		clockTime:  time.Now(),
+		input:      input,
+		logs:       []string{},
+		dashboard:  screens.NewDashboard(),
+		pairModels: make(map[string]screens.PairModel),
 	}
 }
 
+// =============================================================================
+// Init
+// =============================================================================
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(tickCmd(), waitForMsg(m.msgCh), waitForNews(m.newsCh))
 }
@@ -112,6 +125,9 @@ func waitForNews(ch <-chan []news.NewsItem) tea.Cmd {
 	return func() tea.Msg { return newsMsg(<-ch) }
 }
 
+// =============================================================================
+// Update
+// =============================================================================
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
@@ -132,15 +148,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "tab":
-			m.activeTab = (m.activeTab + 1) % (len(m.symbols) + 1)
-		case "shift+tab":
-			m.activeTab = (m.activeTab - 1 + len(m.symbols) + 1) % (len(m.symbols) + 1)
-		case "0":
+		case "tab", "ctrl+pgdown":
+			total := len(m.dashboard.Symbols) + 1
+			m.activeTab = (m.activeTab + 1) % total
+		case "shift+tab", "ctrl+pgup":
+			total := len(m.dashboard.Symbols) + 1
+			m.activeTab = (m.activeTab - 1 + total) % total
+		case "ctrl+0":
 			m.activeTab = 0
-		case "1", "2", "3", "4", "5":
-			idx := int(msg.String()[0] - '0')
-			if idx <= len(m.symbols) {
+		case "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5":
+			idx := int(msg.String()[len(msg.String())-1] - '0')
+			if idx <= len(m.dashboard.Symbols) {
 				m.activeTab = idx
 			}
 		case "enter":
@@ -157,6 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// handleWS — обрабатывает входящие WS сообщения
 func (m *Model) handleWS(msg ws.Message) {
 	m.connected = true
 	switch msg.Channel {
@@ -176,19 +195,26 @@ func (m *Model) handleWS(msg ws.Message) {
 		if err := json.Unmarshal(msg.Data, &t); err != nil {
 			return
 		}
-		m.ensurePair(msg.Symbol)
-		p := m.pairs[msg.Symbol]
+		m.dashboard.EnsurePair(msg.Symbol)
+		p := m.dashboard.Pairs[msg.Symbol]
 		p.Price = t.LastPrice
 		p.BuyVol += t.BuyVol
 		p.SellVol += t.SellVol
+		// Синхронизируем с PairModel
+		if pm, ok := m.pairModels[msg.Symbol]; ok {
+			pm.Data = p
+			m.pairModels[msg.Symbol] = pm
+		} else {
+			m.pairModels[msg.Symbol] = screens.NewPair(msg.Symbol)
+		}
 		m.addLog(fmt.Sprintf("💹 %s %s", msg.Symbol, t.LastPrice))
 	case "stats":
 		var s StatsMsg
 		if err := json.Unmarshal(msg.Data, &s); err != nil {
 			return
 		}
-		m.ensurePair(msg.Symbol)
-		p := m.pairs[msg.Symbol]
+		m.dashboard.EnsurePair(msg.Symbol)
+		p := m.dashboard.Pairs[msg.Symbol]
 		p.LSR = s.LsrTaker
 		p.OI = s.OpenInterestUSD
 		m.addLog(fmt.Sprintf("📊 stats %s", msg.Symbol))
@@ -196,13 +222,6 @@ func (m *Model) handleWS(msg ws.Message) {
 		m.addLog(fmt.Sprintf("💥 LIQ %s", msg.Symbol))
 	case "candles":
 		m.addLog(fmt.Sprintf("🕯️  candle %s", msg.Symbol))
-	}
-}
-
-func (m *Model) ensurePair(symbol string) {
-	if _, ok := m.pairs[symbol]; !ok {
-		m.pairs[symbol] = &PairData{Symbol: symbol}
-		m.symbols = append(m.symbols, symbol)
 	}
 }
 
@@ -217,16 +236,10 @@ func joinLines(lines []string) string {
 }
 
 func (m *Model) recalcSizes() {
-	rightW   := m.width * rightbarPct / 100
-	leftW    := m.width - rightW
-	mainH    := m.height - 4
-	newsTotal := newsContent + 2
-	vpH      := mainH - newsTotal - 3
-	if vpH < 1 {
-		vpH = 1
-	}
-	m.contentView = viewport.New(leftW-2, vpH)
-	m.logView = viewport.New(rightW-2, mainH*logsPct/100-2)
+	rightW  := m.width * rightbarPct / 100
+	leftW   := m.width - rightW - 2
+	mainH   := m.height - 5
+	m.logView = viewport.New(leftW-2, mainH*logsPct/100-2)
 }
 
 // =============================================================================

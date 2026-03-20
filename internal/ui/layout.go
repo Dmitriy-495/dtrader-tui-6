@@ -36,9 +36,12 @@ func (m Model) renderLeft(w, h int) string {
 
 	var screen string
 	if m.activeTab == 0 {
-		screen = m.renderDashboard()
-	} else if m.activeTab <= len(m.symbols) {
-		screen = m.renderPairScreen(m.symbols[m.activeTab-1])
+		screen = m.dashboard.Render(w-4, vpH)
+	} else if m.activeTab <= len(m.dashboard.Symbols) {
+		sym := m.dashboard.Symbols[m.activeTab-1]
+	if pm, ok := m.pairModels[sym]; ok {
+		screen = pm.Render(w-4, vpH)
+	}
 	}
 
 	vp := viewport.New(w-4, vpH)

@@ -27,7 +27,7 @@ func (m Model) renderNews(w, h int) string {
 			line := fmt.Sprintf("%s %s  %s",
 				GrayStyle.Render(formatAge(age)),
 				sentiment,
-				OrangeStyle.Render(truncate(item.Title, w-20)),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(truncate(item.Title, w-20)),
 			)
 			sb.WriteString(line + "\n")
 		}
