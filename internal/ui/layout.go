@@ -13,7 +13,7 @@ const (
 
 // renderMain — [content | rightbar]
 func (m Model) renderMain() string {
-	mainH  := m.height - 5 // header(3) + footer(1) + \n(1)
+	mainH  := m.height - 6 // header(3) + footer(1) + \n(1)
 	rightW := m.width * rightbarPct / 100
 	leftW  := m.width - rightW
 
