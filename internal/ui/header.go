@@ -39,7 +39,7 @@ func (m Model) renderHeader() string {
 	}
 	gap := strings.Repeat(" ", totalGap/(len(blocks)-1))
 
-	return HeaderStyle.Width(m.width).Render(strings.Join(blocks, gap))
+	return HeaderStyle.Width(m.width - 2).Render(strings.Join(blocks, gap))
 }
 
 func renderServ(connected bool, ms int64) string {
