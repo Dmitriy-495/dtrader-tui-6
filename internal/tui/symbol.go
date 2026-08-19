@@ -36,7 +36,7 @@ var (
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorder).
-			Padding(0, 1)
+			Padding(1, 2)
 
 	titleStyle = lipgloss.NewStyle().
 			Foreground(colorText).
@@ -59,9 +59,10 @@ type Model struct {
 	symbol string
 	client *ws.Client
 
-	status   ws.Status
-	snapshot *indicators.Snapshot // nil, пока ничего не пришло по этому символу
-	lastErr  string               // последняя ошибка разбора JSON, если была — не молчим о битых данных
+	status    ws.Status
+	snapshot  *indicators.Snapshot  // nil, пока ничего не пришло по этому символу
+	orderbook *indicators.OrderBook // nil, пока не пришло ни одного orderbook-сообщения для этого символа
+	lastErr   string                // последняя ошибка разбора JSON, если была — не молчим о битых данных
 
 	width, height int
 }
@@ -123,19 +124,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsMsg:
 		cmd := waitForMessage(m.client) // сразу планируем ожидание следующего — та же причина, что и для статуса выше
 
-		if msg.Channel != "indicators" || msg.Symbol != m.symbol {
-			// Не наш канал/символ — просто игнорируем, но обязательно
-			// продолжаем слушать (cmd уже запланирован строкой выше).
+		if msg.Symbol != m.symbol {
+			// Не наш символ — игнорируем оба интересующих нас канала
+			// (indicators и orderbook), но продолжаем слушать.
 			return m, cmd
 		}
 
-		var snap indicators.Snapshot
-		if err := json.Unmarshal(msg.Data, &snap); err != nil {
-			m.lastErr = err.Error()
-			return m, cmd
+		switch msg.Channel {
+		case "indicators":
+			var snap indicators.Snapshot
+			if err := json.Unmarshal(msg.Data, &snap); err != nil {
+				m.lastErr = err.Error()
+				return m, cmd
+			}
+			m.snapshot = &snap
+			m.lastErr = ""
+
+		case "orderbook":
+			var ob indicators.OrderBook
+			if err := json.Unmarshal(msg.Data, &ob); err != nil {
+				m.lastErr = err.Error()
+				return m, cmd
+			}
+			m.orderbook = &ob
+			m.lastErr = ""
 		}
-		m.snapshot = &snap
-		m.lastErr = ""
+
 		return m, cmd
 	}
 
@@ -143,40 +157,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	var b strings.Builder
+	var head strings.Builder
 
-	b.WriteString(titleStyle.Render(fmt.Sprintf("  %s  ", m.symbol)))
-	b.WriteString("  ")
-	b.WriteString(statusBadge(m.status))
-	if m.snapshot != nil {
-		b.WriteString("   ")
-		b.WriteString(renderPressureInline(m.snapshot.Pressure))
-	}
-	b.WriteString("\n\n")
+	head.WriteString(titleStyle.Render(fmt.Sprintf("  %s  ", m.symbol)))
+	head.WriteString("  ")
+	head.WriteString(bestPricesText(m.orderbook))
+	head.WriteString("\n\n")
 
 	if m.snapshot == nil {
-		b.WriteString(mutedStyle.Render("ожидание данных indicators..."))
+		head.WriteString(mutedStyle.Render("ожидание данных indicators..."))
 		if m.lastErr != "" {
-			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора: " + m.lastErr))
+			head.WriteString("\n")
+			head.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора: " + m.lastErr))
 		}
-		return borderStyle.Render(b.String())
+		return borderStyle.Render(head.String())
 	}
 
-	b.WriteString(renderTimeframeBlocks(*m.snapshot))
+	var right strings.Builder
+	right.WriteString(renderPressureBlock(m.snapshot.Pressure))
+	right.WriteString("\n")
+	right.WriteString(blockDividerStyle.Render(strings.Repeat("─", timeframeBlockWidth)))
+	right.WriteString("\n")
+	right.WriteString(renderTimeframeBlocks(*m.snapshot))
+
+	left := renderOrderbookColumn(m.orderbook)
+
+	// Две колонки бок о бок: стакан (20 строк, приближенный к
+	// биржевому виду) слева, ТФ-блоки справа — решение из чата
+	// ("разделим карточку символа на две части по горизонтали").
+	// lipgloss.JoinHorizontal выравнивает обе колонки по высоте сам,
+	// не нужно вручную считать разницу строк между ними.
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right.String())
+
+	head.WriteString(body)
 
 	if m.lastErr != "" {
-		b.WriteString("\n")
-		b.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора последнего сообщения: " + m.lastErr))
+		head.WriteString("\n")
+		head.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора последнего сообщения: " + m.lastErr))
 	}
 
-	return borderStyle.Render(b.String())
+	return borderStyle.Render(head.String())
 }
 
 // statusBadge — цветной индикатор состояния соединения, тот же
 // набор цветов (OK/WARNING/SOS), что использует раздел 11 для
 // SERV/EXCH статусов в header — здесь применяем его к статусу
 // самого WS-соединения TUI.
+// statusBadge — цветной индикатор состояния WS-соединения
+// (connected/connecting/reconnecting). НЕ используется в этой вкладке
+// (Model.View выше) — решение из чата: статус соединения общий на
+// всё приложение (TUI↔ws-server), не свойство конкретной пары, и
+// должен показываться один раз в хедере общего layout'а, когда он
+// появится, а не дублироваться на каждой вкладке символа. Оставлена
+// здесь готовой к переиспользованию тем layout'ом.
 func statusBadge(s ws.Status) string {
 	switch s {
 	case ws.StatusConnected:
@@ -186,6 +219,36 @@ func statusBadge(s ws.Status) string {
 	default:
 		return lipgloss.NewStyle().Foreground(colorWarn).Render("○ connecting...")
 	}
+}
+
+// bestPricesText показывает best bid/ask из стакана (канал orderbook),
+// жирным, отформатированные через formatNumber. Заменяет собой
+// statusBadge в шапке вкладки символа (решение из чата: статус связи
+// переезжает в общий хедер, здесь вместо него — самая востребованная
+// цифра для конкретной пары).
+func bestPricesText(ob *indicators.OrderBook) string {
+	if ob == nil {
+		return mutedStyle.Render("bid/ask: ожидание данных orderbook...")
+	}
+
+	bidStr := "n/a"
+	if bid, ok := ob.BestBid(); ok {
+		bidStr = formatNumber(bid)
+	}
+	askStr := "n/a"
+	if ask, ok := ob.BestAsk(); ok {
+		askStr = formatNumber(ask)
+	}
+
+	bold := lipgloss.NewStyle().Bold(true)
+	return fmt.Sprintf(
+		"%s %s  %s %s  %s",
+		mutedStyle.Render("bid"),
+		bold.Foreground(colorOK).Render(bidStr),
+		mutedStyle.Render("ask"),
+		bold.Foreground(colorSOS).Render(askStr),
+		mutedStyle.Render("USDT"),
+	)
 }
 
 // timeframesToShow возвращает список ТФ для отображения: сначала
@@ -211,10 +274,13 @@ func timeframesToShow(snap indicators.Snapshot) []string {
 	return ordered
 }
 
-// timeframeBlockWidth — ширина одного ТФ-блока в лейбл-значение
-// формате (см. renderTimeframeBlocks). Достаточно для самой длинной
-// строки-значения ("SELL   994399.0 🔥") с запасом.
-const timeframeBlockWidth = 40
+// timeframeBlockWidth — ширина одного ТФ-блока (разделительная линия
+// и общая ширина рамки ориентируются на неё). С добавлением
+// formatNumber (### ###,## — разделители тысяч) и двусторонних
+// шкал (barWidth=15) самая длинная строка — PRESSURE в шапке
+// ("PRESSURE <шкала> 0.518  bid/ask 41 053,00/79 193,00") — пересчитано
+// под неё с запасом на случай ещё больших объёмов.
+const timeframeBlockWidth = 65
 
 var (
 	// blockLabelStyle — лейбл строки внутри блока ("TREND", "ANGLE"...),
@@ -233,6 +299,47 @@ var (
 	// из трёх блоков подряд).
 	blockDividerStyle = lipgloss.NewStyle().Foreground(colorMuted)
 )
+
+// formatNumber форматирует число в стиле "### ###,##" (пробел —
+// разделитель тысяч, запятая — десятичный разделитель), по запросу
+// из чата: "необходимо выводить форматированные значения в формате
+// ### ###,##". Применяется к объёмам (buy/sell/bid/ask) — это не
+// деньги в валюте счёта, а объём актива/контрактов (см. обсуждение
+// в чате), но тот же читаемый формат чисел уместен и для них.
+//
+// Реализовано вручную (не через golang.org/x/text/message, который
+// умеет это "из коробки"), чтобы не тащить лишнюю зависимость ради
+// одной функции форматирования и не полагаться на её выбор
+// разделителей по конкретной локали — нам нужен ровно фиксированный
+// формат "пробел + запятая", а не локаль-зависимый.
+func formatNumber(v float64) string {
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+
+	// %.2f сначала — так десятичное округление (в т.ч. до целых при
+	// x,995 → x+1,00) делает стандартная библиотека, а не наша
+	// самодельная арифметика, которую было бы легче сломать на
+	// граничных случаях (например 999999.995).
+	str := fmt.Sprintf("%.2f", v)
+	intPart, fracPart, _ := strings.Cut(str, ".")
+
+	var b strings.Builder
+	n := len(intPart)
+	for i, r := range intPart {
+		if i > 0 && (n-i)%3 == 0 {
+			b.WriteRune(' ')
+		}
+		b.WriteRune(r)
+	}
+
+	result := b.String() + "," + fracPart
+	if neg {
+		result = "-" + result
+	}
+	return result
+}
 
 // renderTimeframeBlocks рисует ленту вертикальных карточек — по одной
 // на таймфрейм, каждая со всеми индикаторами этого ТФ построчно
@@ -272,12 +379,8 @@ func renderTimeframeBlocks(snap indicators.Snapshot) string {
 		b.WriteString(emaSpreadBar(t.EMAFast, t.EMASlow))
 		b.WriteString("\n")
 
-		b.WriteString(blockLabelStyle.Render("BUY"))
-		b.WriteString(dataStyle.Render(fmt.Sprintf("%.1f", v.BuyVol)))
-		b.WriteString("\n")
-
-		b.WriteString(blockLabelStyle.Render("SELL"))
-		b.WriteString(volCellWithSpike(v.SellVol, v.Spike))
+		b.WriteString(blockLabelStyle.Render("VOL Δ%"))
+		b.WriteString(volumeDeltaBar(v.BuyVol, v.SellVol, v.Spike))
 		b.WriteString("\n")
 
 		// border-bottom: не после последнего блока в ленте — там уже
@@ -292,51 +395,91 @@ func renderTimeframeBlocks(snap indicators.Snapshot) string {
 	return b.String()
 }
 
-// angleMaxDegrees — верхняя граница нормализации для мини-шкалы угла.
+// barWidth — количество ячеек двусторонней мини-шкалы (в 3 раза
+// длиннее исходной версии по запросу — "увеличить в три раза длину
+// индикаторов"). Нечётное число — есть единственная центральная
+// ячейка для нуля, шкала визуально симметрична влево/вправо.
+const barWidth = 15
+
+// barCenter — индекс центральной ячейки (ноль), 0-based.
+const barCenter = barWidth / 2 // 7 при barWidth=15
+
+// bipolarBar рисует двустороннюю шкалу с центром в нуле: отрицательные
+// значения растут влево от центра, положительные — вправо (решение
+// из чата: "за ноль принять середину индикатора, отрицательные
+// значения влево, положительные вправо"). Общая механика для
+// angle/EMA-спреда/imbalance — каждый вызывает её со своим max
+// (потолок нормализации) и своим смещением нуля (angle/EMA — ноль в
+// нуле, imbalance — "ноль" смещён к 1.0, см. renderPressureInline).
+//
+// value — уже смещённое значение (то есть для imbalance это
+// imbalance-1.0, не сам imbalance) — так сама bipolarBar не должна
+// знать про разные точки отсчёта у разных индикаторов, это ответственность
+// вызывающего кода.
+func bipolarBar(value, max float64) (cells string, filledRight int, filledLeft int) {
+	v := value
+	if v > max {
+		v = max
+	}
+	if v < -max {
+		v = -max
+	}
+	filled := int(v / max * float64(barCenter))
+
+	cellsRunes := make([]rune, barWidth)
+	for i := range cellsRunes {
+		cellsRunes[i] = '░'
+	}
+	cellsRunes[barCenter] = '│' // центральная отметка нуля — всегда видна,
+	// даже когда filled==0, чтобы шкала не выглядела как "просто
+	// пустая полоса", а явно показывала, где проходит ноль.
+
+	switch {
+	case filled > 0:
+		for i := barCenter + 1; i <= barCenter+filled && i < barWidth; i++ {
+			cellsRunes[i] = '█'
+		}
+		filledRight = filled
+	case filled < 0:
+		for i := barCenter - 1; i >= barCenter+filled && i >= 0; i-- {
+			cellsRunes[i] = '█'
+		}
+		filledLeft = -filled
+	}
+
+	return string(cellsRunes), filledRight, filledLeft
+}
+
+// angleMaxDegrees — верхняя граница нормализации для шкалы угла.
 // Не теоретический предел angle (у него формально такого нет) — это
-// практический потолок для шкалы 0..bar: в реальных прод-данных
-// (см. internal/tui/symbol_test.go, снятые с прода 2026-08-17)
-// наблюдались значения примерно до ±80. 90 — круглое число с небольшим
-// запасом сверх этого. Значения за пределами зажимаются (clamp), а
-// не растягивают шкалу — иначе один резкий выброс "сплющил" бы
-// шкалу для всех обычных, не экстремальных значений в этом же
-// столбце и в последующих кадрах.
+// практический потолок: в реальных прод-данных (см.
+// internal/tui/symbol_test.go, снятые с прода 2026-08-17) наблюдались
+// значения примерно до ±80. 90 — круглое число с небольшим запасом
+// сверх этого. Значения за пределами зажимаются (clamp), а не
+// растягивают шкалу — иначе один резкий выброс "сплющил" бы шкалу
+// для всех обычных, не экстремальных значений в этом же столбце и
+// в последующих кадрах.
 const angleMaxDegrees = 90.0
 
-// angleBarWidth — количество ячеек мини-шкалы (███░░).
-const angleBarWidth = 5
-
-// angleBar рисует мини-шкалу силы угла тренда (0..angleMaxDegrees,
-// по модулю — направление уже показано отдельно в TREND) плюс само
-// число рядом, раскрашенную тем же цветом, что direction (bar сам
-// по себе не говорит вверх или вниз — это делает соседняя колонка
-// TREND, здесь только цвет как визуальная связка с ней).
+// angleBar рисует двустороннюю шкалу угла тренда (центр=0°, влево
+// отрицательные, вправо положительные — direction уже показан
+// отдельно в TREND, здесь только сила и знак угла), число — после
+// шкалы (решение из чата).
 func angleBar(angle float64) string {
-	abs := angle
-	if abs < 0 {
-		abs = -abs
-	}
-	if abs > angleMaxDegrees {
-		abs = angleMaxDegrees
-	}
-	filled := int(abs / angleMaxDegrees * angleBarWidth)
-	if filled > angleBarWidth {
-		filled = angleBarWidth
-	}
+	bar, right, left := bipolarBar(angle, angleMaxDegrees)
 
 	color := colorNeutral
 	switch {
-	case angle > 0:
+	case right > 0:
 		color = colorOK
-	case angle < 0:
+	case left > 0:
 		color = colorSOS
 	}
 
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", angleBarWidth-filled)
-	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%s %.0f°", bar, angle))
+	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%s %+.0f°", bar, angle))
 }
 
-// emaSpreadMaxPercent — верхняя граница нормализации для мини-шкалы
+// emaSpreadMaxPercent — верхняя граница нормализации для шкалы
 // EMA-спреда, тот же принцип clamp, что и angleMaxDegrees.
 //
 // Откалибровано по реальным данным с прода (см. realIndicatorsPayload
@@ -354,51 +497,68 @@ func angleBar(angle float64) string {
 // отличим от нуля даже при заметном движении цены — понизить ещё.
 const emaSpreadMaxPercent = 0.05
 
-// emaSpreadBar рисует мини-шкалу силы расхождения EMA fast/slow как
-// процент от slow (спред в % = (fast-slow)/slow*100 — стандартный
+// emaSpreadBar рисует двустороннюю шкалу расхождения EMA fast/slow
+// как процент от slow (спред в % = (fast-slow)/slow*100 — стандартный
 // способ сделать разницу цен сопоставимой между разными по цене
-// символами, а не сравнивать абсолютные дельты в валюте).
-func emaSpreadBar(fast, slow float64) string {
-	if slow == 0 {
-		return mutedStyle.Render(strings.Repeat("░", angleBarWidth) + " n/a")
-	}
-	spreadPct := (fast - slow) / slow * 100
+// символами, а не сравнивать абсолютные дельты в валюте). Центр=0%
+// (fast==slow), влево — fast<slow (нисходящее расхождение), вправо
+// — fast>slow (восходящее).
+// volumeDeltaMaxPercent — потолок нормализации для шкалы дельты
+// объёма. В отличие от angleMaxDegrees/emaSpreadMaxPercent (сырые
+// величины, требующие эмпирической калибровки под конкретный
+// диапазон), это уже нормализованный процент по формуле ниже — у
+// него естественный теоретический предел ровно ±100% (весь объём
+// в одну сторону), так что калибровать нечего, берём сам предел.
+const volumeDeltaMaxPercent = 100.0
 
-	abs := spreadPct
-	if abs < 0 {
-		abs = -abs
+// volumeDeltaBar рисует двустороннюю шкалу дисбаланса объёма покупок/
+// продаж за таймфрейм: (buy-sell)/(buy+sell)*100 — симметричный
+// процент, решение из чата ("числовые значения отображать в
+// процентах"), заменяет собой прежние раздельные BUY/SELL-числа.
+// Влево — sell доминирует, вправо — buy доминирует. При spike=true
+// (см. indicators.Volume.Spike) добавляет пометку 🔥, тот же смысл,
+// что раньше был у volCellWithSpike.
+func volumeDeltaBar(buyVol, sellVol float64, spike bool) string {
+	total := buyVol + sellVol
+	if total == 0 {
+		return mutedStyle.Render(strings.Repeat("░", barCenter) + "│" + strings.Repeat("░", barCenter) + " n/a")
 	}
-	if abs > emaSpreadMaxPercent {
-		abs = emaSpreadMaxPercent
-	}
-	filled := int(abs / emaSpreadMaxPercent * angleBarWidth)
-	if filled > angleBarWidth {
-		filled = angleBarWidth
-	}
+	deltaPct := (buyVol - sellVol) / total * 100
+
+	bar, right, left := bipolarBar(deltaPct, volumeDeltaMaxPercent)
 
 	color := colorNeutral
 	switch {
-	case spreadPct > 0:
-		color = colorOK // fast > slow — восходящее расхождение
-	case spreadPct < 0:
-		color = colorSOS
+	case right > 0:
+		color = colorOK // buy доминирует
+	case left > 0:
+		color = colorSOS // sell доминирует
 	}
 
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", angleBarWidth-filled)
-	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%s %+.2f%%", bar, spreadPct))
-}
-
-// volCellWithSpike — то же оформление, что buy (dataStyle), плюс
-// пометка всплеска: spike относится к паре buy/sell в целом
-// (indicators.Volume.Spike — одно bool-поле на весь ТФ, не отдельно
-// на buy и на sell), показываем его при sell, а не дублируем на
-// обеих колонках — так его видно один раз, не два.
-func volCellWithSpike(sellVol float64, spike bool) string {
-	text := dataStyle.Render(fmt.Sprintf("%.1f", sellVol))
+	text := fmt.Sprintf("%s %+.1f%%", bar, deltaPct)
 	if spike {
 		text += " 🔥"
 	}
-	return text
+	return lipgloss.NewStyle().Foreground(color).Render(text)
+}
+
+func emaSpreadBar(fast, slow float64) string {
+	if slow == 0 {
+		return mutedStyle.Render(strings.Repeat("░", barWidth) + " n/a")
+	}
+	spreadPct := (fast - slow) / slow * 100
+
+	bar, right, left := bipolarBar(spreadPct, emaSpreadMaxPercent)
+
+	color := colorNeutral
+	switch {
+	case right > 0:
+		color = colorOK
+	case left > 0:
+		color = colorSOS
+	}
+
+	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%s %+.2f%%", bar, spreadPct))
 }
 
 // directionText раскрашивает направление тренда — зелёный/красный/
@@ -414,24 +574,41 @@ func directionText(direction string) string {
 	}
 }
 
-// renderPressureInline показывает bid/ask давление и imbalance —
-// единственный P-индикатор без разбивки по ТФ (не привязан ни к
-// одному конкретному таймфрейму), поэтому живёт в шапке вкладки
-// рядом с именем символа/статусом соединения, а не в одном из
-// ТФ-блоков (решение из чата).
-func renderPressureInline(p indicators.Pressure) string {
-	imbColor := colorNeutral
-	switch {
-	case p.Imbalance > 1.05:
-		imbColor = colorOK // bid > ask ощутимо — давление покупателей
-	case p.Imbalance < 0.95:
-		imbColor = colorSOS // ask > bid ощутимо — давление продавцов
+// renderPressureBlock показывает bid/ask давление как двустороннюю
+// шкалу симметричного процента (bid-ask)/(bid+ask)*100, центр — паритет
+// (bid==ask), влево — давление продавцов, вправо — давление покупателей
+// (замена прежнего коэффициента imbalance=bid/ask на процент — решение
+// привязан ни к одному конкретному таймфрейму), поэтому рисуется
+// отдельным блоком в шапке вкладки, под именем символа/статусом —
+// шкала той же ширины (barWidth), что и остальные индикаторы, не
+// поместилась бы в одну строку с заголовком (решение из чата).
+func renderPressureBlock(p indicators.Pressure) string {
+	// Симметричный процент вместо коэффициента imbalance=bid/ask,
+	// решение из чата: "и в шапке тоже pressure" (в процентах, тем
+	// же принципом, что дельта объёма — (bid-ask)/(bid+ask)*100).
+	total := p.BidVol + p.AskVol
+	var imbalancePct float64
+	if total != 0 {
+		imbalancePct = (p.BidVol - p.AskVol) / total * 100
 	}
+
+	bar, right, left := bipolarBar(imbalancePct, volumeDeltaMaxPercent)
+
+	color := colorNeutral
+	switch {
+	case right > 0:
+		color = colorOK // bid > ask — давление покупателей
+	case left > 0:
+		color = colorSOS // ask > bid — давление продавцов
+	}
+
 	return fmt.Sprintf(
-		"%s %s/%s imb=%s",
-		mutedStyle.Render("P:"),
-		dataStyle.Render(fmt.Sprintf("%.0f", p.BidVol)),
-		dataStyle.Render(fmt.Sprintf("%.0f", p.AskVol)),
-		lipgloss.NewStyle().Foreground(imbColor).Bold(true).Render(fmt.Sprintf("%.3f", p.Imbalance)),
+		"%s%s %s  %s %s/%s",
+		blockLabelStyle.Render("PRESSURE"),
+		lipgloss.NewStyle().Foreground(color).Render(bar),
+		lipgloss.NewStyle().Foreground(color).Bold(true).Render(fmt.Sprintf("%+.1f%%", imbalancePct)),
+		mutedStyle.Render("bid/ask"),
+		dataStyle.Render(formatNumber(p.BidVol)),
+		dataStyle.Render(formatNumber(p.AskVol)),
 	)
 }
