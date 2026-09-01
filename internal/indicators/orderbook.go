@@ -58,3 +58,17 @@ func (ob OrderBook) BestBid() (price float64, ok bool) {
 	}
 	return ob.Bids[0].Price(), true
 }
+
+// MidPrice возвращает среднюю цену между лучшим bid и лучшим ask,
+// ok=false если стакан пуст хотя бы с одной стороны — тот же принцип
+// защиты, что у BestBid/BestAsk по отдельности (не должно приводить
+// к панике или показу бессмысленного значения вроде половины от
+// одной только ask-цены).
+func (ob OrderBook) MidPrice() (price float64, ok bool) {
+	bid, bidOK := ob.BestBid()
+	ask, askOK := ob.BestAsk()
+	if !bidOK || !askOK {
+		return 0, false
+	}
+	return (bid + ask) / 2, true
+}

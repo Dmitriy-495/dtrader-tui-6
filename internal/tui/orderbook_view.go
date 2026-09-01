@@ -19,8 +19,13 @@ import (
 const orderbookLevelsPerSide = 10
 
 // orderbookRowWidth — ширина одной строки стакана в символах (цена +
-// объём + отступы), под неё же нормализуется ширина полосы глубины.
-const orderbookRowWidth = 26
+// объём + отступы), под неё же нормализуется ширина полосы глубины и
+// центрируются заголовок ORDERBOOK/шапка колонок. Должна точно
+// совпадать с реальной длиной строки, которую строит renderOrderbookRow
+// (orderbookPriceWidth + "  " + orderbookVolWidth = 12+2+14 = 28) —
+// раньше было 26 (расхождение в 2 символа), из-за чего заголовок и
+// шапка колонок центрировались не по факту видимой ширины данных.
+const orderbookRowWidth = orderbookPriceWidth + 2 + orderbookVolWidth
 
 // orderbookPriceWidth/orderbookVolWidth — ширины подколонок цены и
 // объёма внутри строки стакана.
@@ -34,14 +39,15 @@ var (
 	// сильно затемнённые относительно "чистых" colorSOS/colorOK
 	// (196/82), чтобы текст поверх оставался читаемым — на
 	// скриншоте-образце заливка тоже мягкая, не кричаще-яркая.
-	askBgColor = lipgloss.Color("52")  // приглушённый тёмно-красный
-	bidBgColor = lipgloss.Color("22")  // приглушённый тёмно-зелёный
+	askBgColor = lipgloss.Color("52") // приглушённый тёмно-красный
+	bidBgColor = lipgloss.Color("22") // приглушённый тёмно-зелёный
 	askFgColor = colorSOS
 	bidFgColor = colorOK
 )
 
-// renderOrderbookColumn рисует полную колонку стакана: до
-// orderbookLevelsPerSide строк asks (от дальней к best ask, сверху
+// renderOrderbookColumn рисует полную колонку стакана: заголовок
+// "ORDERBOOK" по центру, строку с названиями колонок (PRICE/SIZE),
+// до orderbookLevelsPerSide строк asks (от дальней к best ask, сверху
 // вниз — так лучшая цена продажи оказывается ближе к центру, как на
 // бирже), строку спреда с текущей ценой, затем до
 // orderbookLevelsPerSide строк bids (от best bid к дальней).
@@ -57,6 +63,11 @@ func renderOrderbookColumn(ob *indicators.OrderBook) string {
 	maxVol := maxOrderbookVolume(ob)
 
 	var b strings.Builder
+
+	b.WriteString(orderbookTitleStyle.Render("ORDERBOOK"))
+	b.WriteString("\n")
+	b.WriteString(renderOrderbookColumnHeader())
+	b.WriteString("\n")
 
 	// asks: биржевой порядок — дальняя цена сверху, best ask снизу
 	// (ближе к спреду/центру) — берём последние N уровней среза и
@@ -85,6 +96,31 @@ func renderOrderbookColumn(ob *indicators.OrderBook) string {
 	}
 
 	return b.String()
+}
+
+// orderbookTitleStyle — заголовок "ORDERBOOK" по центру колонки,
+// решение из чата: "шапка с наименованием колонок и заголовком
+// ORDERBOOK (с выравниванием по центру)".
+var orderbookTitleStyle = lipgloss.NewStyle().
+	Foreground(colorText).
+	Bold(true).
+	Width(orderbookRowWidth).
+	Align(lipgloss.Center)
+
+// orderbookColumnHeaderStyle — стиль строки с названиями колонок
+// (PRICE/SIZE), приглушённый — она вспомогательная, не должна
+// перетягивать внимание с заголовка ORDERBOOK или самих чисел.
+var orderbookColumnHeaderStyle = lipgloss.NewStyle().Foreground(colorMuted)
+
+// renderOrderbookColumnHeader рисует строку "PRICE   SIZE" с теми же
+// ширинами подколонок, что реальные строки стакана (orderbookPriceWidth/
+// orderbookVolWidth) — так подписи оказываются точно над своими
+// колонками чисел, не просто "где-то сверху".
+func renderOrderbookColumnHeader() string {
+	return orderbookColumnHeaderStyle.Render(fmt.Sprintf("%s  %s",
+		padLeft("PRICE", orderbookPriceWidth),
+		padLeft("SIZE", orderbookVolWidth),
+	))
 }
 
 // maxOrderbookVolume находит наибольший объём среди отображаемых

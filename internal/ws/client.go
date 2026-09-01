@@ -41,6 +41,13 @@ type Client struct {
 	url    string
 	apiKey string
 
+	// readTimeout — см. подробное объяснение у места использования
+	// (SetReadDeadline в connectAndRead). Поле, а не глобальная
+	// константа — тестам нужно короткое значение, чтобы проверять
+	// реальное срабатывание таймаута без ожидания настоящих 30s
+	// (см. internal/ws/client_test.go).
+	readTimeout time.Duration
+
 	// Messages — канал, куда клиент публикует каждое успешно
 	// разобранное сообщение от сервера. Небуферизован специально:
 	// вызывающий код (bubbletea Update-цикл через tea.Cmd) должен
@@ -77,14 +84,23 @@ func (s Status) String() string {
 
 const reconnectInterval = 3 * time.Second
 
+// defaultReadTimeout — значение readTimeout по умолчанию для New().
+// 30s: заметно больше самого редкого регулярного потока (system-
+// heartbeat от ws-server раз в ~10s, см. RunSystem в ws-server), чтобы
+// не считать живое, но временно тихое соединение мёртвым, и заметно
+// меньше, чем "минуты", которые взяла бы себе ОС по умолчанию без
+// явного дедлайна.
+const defaultReadTimeout = 30 * time.Second
+
 // New создаёт клиент. url — полный адрес, например ws://1.2.3.4:9000/ws
 // (см. config.Config.WSServerURL).
 func New(url, apiKey string) *Client {
 	return &Client{
-		url:      url,
-		apiKey:   apiKey,
-		Messages: make(chan Message),
-		Status:   make(chan Status, 1),
+		url:         url,
+		apiKey:      apiKey,
+		readTimeout: defaultReadTimeout,
+		Messages:    make(chan Message),
+		Status:      make(chan Status, 1),
 	}
 }
 
@@ -165,6 +181,26 @@ func (c *Client) connectAndRead(ctx context.Context) error {
 	}()
 
 	for {
+		// readTimeout: без явного дедлайна conn.ReadMessage() блокируется
+		// неопределённо долго, если TCP-соединение "подвисло" молча
+		// (сеть перестала отвечать, но не прислала явный close-фрейм —
+		// частый случай на нестабильной связи, например мобильном
+		// интернете). ОС в итоге сама вернёт ошибку по своему таймауту,
+		// но это может занять заметно больше времени, чем нужно
+		// интерактивному TUI, где пользователь видит "подвисший" экран
+		// без объяснений. Дедлайн переустанавливается на каждой
+		// итерации — отсчёт идёт от последнего реально полученного
+		// сообщения, а не от момента установления соединения.
+		//
+		// readTimeout=30s: заметно больше самого редкого регулярного
+		// потока (system-heartbeat от ws-server раз в ~10s, см.
+		// RunSystem/pollSymbols в ws-server), чтобы не считать живое,
+		// но временно тихое соединение мёртвым, и заметно меньше, чем
+		// "минуты", которые взяла бы себе ОС по умолчанию.
+		if err := conn.SetReadDeadline(time.Now().Add(c.readTimeout)); err != nil {
+			return fmt.Errorf("не удалось установить read deadline: %w", err)
+		}
+
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {

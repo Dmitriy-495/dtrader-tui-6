@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/Dmitriy-495/dtrader-tui-6/internal/indicators"
-	"github.com/Dmitriy-495/dtrader-tui-6/internal/ws"
 )
 
 // realIndicatorsPayload — реальный JSON из живого прода (см. лог TUI
@@ -16,8 +18,7 @@ import (
 const realIndicatorsPayload = `{"trend":{"1m":{"ema_fast":64336.7819116163,"ema_slow":64316.64902869316,"direction":"neutral","angle":79.5419837407385,"rsi":62.968099861304914,"macd_histogram":0,"ts":1786998812534},"24m":{"ema_fast":64227.10070441352,"ema_slow":64217.998080054225,"direction":"neutral","angle":80.36118722179849,"rsi":0,"macd_histogram":0,"ts":1786998812534},"8m":{"ema_fast":64312.13943956376,"ema_slow":64314.06340467373,"direction":"neutral","angle":-78.79546235408986,"rsi":39.48923194206264,"macd_histogram":-6.312523906260582,"ts":1786998812534}},"volume":{"1m":{"buy_vol":17718,"sell_vol":0,"delta":17718,"spike":false,"ts":1786998812534},"24m":{"buy_vol":994399,"sell_vol":683812,"delta":310587,"spike":false,"ts":1786998812534},"8m":{"buy_vol":58279,"sell_vol":68733,"delta":-10454,"spike":false,"ts":1786998812534}},"pressure":{"bid_vol":41053,"ask_vol":79193,"imbalance":0.518391777051002,"ts":1786998812534}}`
 
 func TestUpdate_ParsesRealIndicatorsPayload(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
 
 	msg := wsMsg{
 		Channel: "indicators",
@@ -46,8 +47,7 @@ func TestUpdate_ParsesRealIndicatorsPayload(t *testing.T) {
 }
 
 func TestUpdate_IgnoresOtherSymbol(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
 
 	msg := wsMsg{
 		Channel: "indicators",
@@ -64,8 +64,7 @@ func TestUpdate_IgnoresOtherSymbol(t *testing.T) {
 }
 
 func TestUpdate_IgnoresOtherChannel(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
 
 	msg := wsMsg{
 		Channel: "trades", // не indicators
@@ -82,8 +81,7 @@ func TestUpdate_IgnoresOtherChannel(t *testing.T) {
 }
 
 func TestUpdate_HandlesMalformedJSON(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
 
 	msg := wsMsg{
 		Channel: "indicators",
@@ -103,8 +101,7 @@ func TestUpdate_HandlesMalformedJSON(t *testing.T) {
 }
 
 func TestView_RendersWithoutPanicBeforeFirstData(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
 
 	out := m.View()
 	if !strings.Contains(out, "BTC_USDT") {
@@ -116,15 +113,23 @@ func TestView_RendersWithoutPanicBeforeFirstData(t *testing.T) {
 }
 
 func TestView_RendersTableAfterData(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
+
+	// WindowSizeMsg обязателен до того, как View() покажет что-либо,
+	// кроме "инициализация..." — viewport (см. Model.vp) не может
+	// быть создан без известного реального размера терминала.
+	// bubbletea гарантирует, что это сообщение реально придёт до
+	// первого пользовательского взаимодействия в живом приложении,
+	// но тест должен эмулировать это явно.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+	m = updated.(Model)
 
 	msg := wsMsg{
 		Channel: "indicators",
 		Symbol:  "BTC_USDT",
 		Data:    json.RawMessage(realIndicatorsPayload),
 	}
-	updated, _ := m.Update(msg)
+	updated, _ = m.Update(msg)
 	m = updated.(Model)
 
 	out := m.View()
@@ -231,8 +236,7 @@ func TestFormatNumber(t *testing.T) {
 const realOrderbookPayload = `{"a":[{"p":"64327.7","s":"40413"},{"p":"64328.7","s":"1855"},{"p":"64329.9","s":"1555"}],"b":[{"p":"64327.6","s":"24469"},{"p":"64327","s":"3518"},{"p":"64326.9","s":"2364"}],"s":"BTC_USDT","t":1786998815289}`
 
 func TestUpdate_ParsesOrderbookAndComputesBestPrices(t *testing.T) {
-	client := ws.New("ws://unused", "unused")
-	m := New("BTC_USDT", client)
+	m := New("BTC_USDT")
 
 	msg := wsMsg{
 		Channel: "orderbook",
@@ -329,11 +333,52 @@ func TestRenderPressureBlock_ComputesSymmetricPercent(t *testing.T) {
 	}
 }
 
+func TestRenderPressureBlock_VolumesOnSeparateLineBelow(t *testing.T) {
+	// Решение из чата: "перенеси bid/ask объёмы под шкалу pressure" —
+	// раньше bid/ask были в той же строке, что и шкала с процентом;
+	// теперь должны быть на отдельной, следующей строке.
+	p := indicators.Pressure{BidVol: 41053, AskVol: 79193, Imbalance: 0.518391777051002}
+	out := renderPressureBlock(p)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("renderPressureBlock должен выдавать 2 строки, получено %d:\n%s", len(lines), out)
+	}
+	if strings.Contains(lines[0], "bid/ask") {
+		t.Errorf("первая строка не должна содержать bid/ask объёмы, получено: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "bid/ask") {
+		t.Errorf("вторая строка должна содержать bid/ask объёмы, получено: %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "41 053,00") || !strings.Contains(lines[1], "79 193,00") {
+		t.Errorf("вторая строка должна содержать отформатированные объёмы, получено: %q", lines[1])
+	}
+}
+
 // realOrderbook20LevelsPayload — полный 20-уровневый (10+10) стакан
 // BTC_USDT с прода (тот же сеанс 2026-08-17 23:33 MSK), нужен для
 // проверки полной картины стакана (realOrderbookPayload выше обрезан
 // до 3 уровней и годится только для BestBid/BestAsk).
 const realOrderbook20LevelsPayload = `{"a":[{"p":"64327.7","s":"40413"},{"p":"64328.7","s":"1855"},{"p":"64329.9","s":"1555"},{"p":"64330.3","s":"89"},{"p":"64331.4","s":"5"},{"p":"64331.5","s":"155"},{"p":"64331.7","s":"2"},{"p":"64331.8","s":"2"},{"p":"64332.4","s":"36"},{"p":"64333.5","s":"310"},{"p":"64334.2","s":"1"},{"p":"64334.4","s":"1"},{"p":"64335.3","s":"594"},{"p":"64335.9","s":"392"},{"p":"64336.1","s":"6"},{"p":"64336.3","s":"2"},{"p":"64337.3","s":"10"},{"p":"64337.6","s":"249"},{"p":"64337.7","s":"10"},{"p":"64337.8","s":"5"}],"b":[{"p":"64327.6","s":"24469"},{"p":"64327","s":"3518"},{"p":"64326.9","s":"2364"},{"p":"64326.5","s":"3852"},{"p":"64326.4","s":"5645"},{"p":"64325.4","s":"1555"},{"p":"64323.2","s":"1270"},{"p":"64322.8","s":"1556"},{"p":"64322.3","s":"1556"},{"p":"64321.4","s":"187"},{"p":"64321.1","s":"1"},{"p":"64321","s":"608"},{"p":"64320.7","s":"156"},{"p":"64320.3","s":"6"},{"p":"64320.2","s":"300"},{"p":"64320","s":"6756"},{"p":"64319.1","s":"36"},{"p":"64319","s":"1556"},{"p":"64318.7","s":"1"},{"p":"64318.3","s":"780"}],"s":"BTC_USDT","t":1786998815289}`
+
+func TestRenderOrderbookColumn_HasTitleAndColumnHeaders(t *testing.T) {
+	// Решение из чата: "добавь в стакане шапку с наименованием колонок
+	// и заголовком ORDERBOOK (с выравниванием по центру)".
+	var ob indicators.OrderBook
+	if err := json.Unmarshal([]byte(realOrderbook20LevelsPayload), &ob); err != nil {
+		t.Fatalf("не удалось разобрать тестовый orderbook: %v", err)
+	}
+	out := renderOrderbookColumn(&ob)
+	lines := strings.Split(out, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("ожидалось минимум 2 строки шапки, получено %d строк", len(lines))
+	}
+	if !strings.Contains(lines[0], "ORDERBOOK") {
+		t.Errorf("первая строка должна содержать заголовок ORDERBOOK, получено: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "PRICE") || !strings.Contains(lines[1], "SIZE") {
+		t.Errorf("вторая строка должна содержать названия колонок PRICE/SIZE, получено: %q", lines[1])
+	}
+}
 
 func TestRenderOrderbookColumn_NilShowsWaiting(t *testing.T) {
 	out := renderOrderbookColumn(nil)
@@ -351,9 +396,11 @@ func TestRenderOrderbookColumn_RendersExpectedLineCount(t *testing.T) {
 	out := renderOrderbookColumn(&ob)
 	lines := strings.Split(out, "\n")
 
-	// 10 asks + 1 строка спреда + 10 bids = 21 строка (решение из
-	// чата: "10 asks сверху + 10 bids снизу").
-	want := orderbookLevelsPerSide*2 + 1
+	// 2 строки шапки (ORDERBOOK + PRICE/SIZE) + 10 asks + 1 строка
+	// спреда + 10 bids = 23 строки. Было 21 (без шапки) — решение из
+	// чата: "добавь в стакане шапку с наименованием колонок и
+	// заголовком ORDERBOOK".
+	want := 2 + orderbookLevelsPerSide*2 + 1
 	if len(lines) != want {
 		t.Errorf("renderOrderbookColumn выдал %d строк, ожидалось %d:\n%s", len(lines), want, out)
 	}
@@ -393,5 +440,150 @@ func TestRenderOrderbookColumn_LimitsToTenLevelsPerSide(t *testing.T) {
 	if strings.Contains(out, formatNumber(farAsk)) {
 		t.Errorf("вывод не должен содержать цену за пределами лимита %d уровней (%s):\n%s",
 			orderbookLevelsPerSide, formatNumber(farAsk), out)
+	}
+}
+
+func TestUpdate_ViewportScrollsWithArrowKeys(t *testing.T) {
+	// Решение из чата: контент не помещается по высоте — добавили
+	// viewport для прокрутки. Тест проверяет, что стрелки вниз реально
+	// двигают позицию прокрутки, а не просто не падают.
+	m := New("BTC_USDT")
+
+	// Маленькая высота — гарантированно меньше контента, чтобы было
+	// что прокручивать.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 15})
+	m = updated.(Model)
+
+	msg := wsMsg{Channel: "indicators", Symbol: "BTC_USDT", Data: json.RawMessage(realIndicatorsPayload)}
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+
+	if !m.vpReady {
+		t.Fatal("viewport должен быть готов после WindowSizeMsg")
+	}
+	startOffset := m.vp.YOffset
+
+	// down несколько раз — viewport.Update реагирует на "down"/"j" по
+	// умолчанию (bubbles/viewport.DefaultKeyMap).
+	for i := 0; i < 5; i++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+	}
+
+	if m.vp.YOffset <= startOffset {
+		t.Errorf("после нажатий вниз YOffset должен вырасти, было %d, стало %d", startOffset, m.vp.YOffset)
+	}
+}
+
+func TestUpdate_HeaderStaysVisibleRegardlessOfScroll(t *testing.T) {
+	// Решение из чата: "шапка уехала вверх" была жалобой ДО добавления
+	// viewport — шапка (имя символа+bid/ask) должна оставаться видна
+	// в View() независимо от прокрутки, потому что рисуется вне vp.
+	m := New("BTC_USDT")
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 15})
+	m = updated.(Model)
+
+	msg := wsMsg{Channel: "indicators", Symbol: "BTC_USDT", Data: json.RawMessage(realIndicatorsPayload)}
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+
+	for i := 0; i < 10; i++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "BTC_USDT") {
+		t.Error("шапка (символ) должна оставаться видна после прокрутки вниз")
+	}
+}
+
+func TestScrollIndicator_HiddenWhenContentFits(t *testing.T) {
+	// Решение из чата: "полосы прокрутки нет, надо бы предусмотреть" —
+	// индикатор нужен только когда реально есть что прокручивать.
+	m := New("BTC_USDT")
+
+	// Большая высота — контент точно поместится целиком.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 150, Height: 200})
+	m = updated.(Model)
+
+	msg := wsMsg{Channel: "indicators", Symbol: "BTC_USDT", Data: json.RawMessage(realIndicatorsPayload)}
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+
+	out := m.View()
+	if strings.Contains(out, "▼") || strings.Contains(out, "▲") || strings.Contains(out, "↕") {
+		t.Errorf("индикатор прокрутки (стрелка) не должен показываться, когда весь контент помещается, получено:\n%s", out)
+	}
+}
+
+func TestScrollIndicator_ShownWhenContentOverflows(t *testing.T) {
+	m := New("BTC_USDT")
+
+	// Маленькая высота — контенту точно не хватит места.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 130, Height: 15})
+	m = updated.(Model)
+
+	msg := wsMsg{Channel: "indicators", Symbol: "BTC_USDT", Data: json.RawMessage(realIndicatorsPayload)}
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "%") {
+		t.Errorf("индикатор прокрутки должен показываться, когда контент не помещается, получено:\n%s", out)
+	}
+	if !strings.Contains(out, "▼") {
+		t.Errorf("в самом верху ожидалась стрелка ▼ (можно скроллить только вниз), получено:\n%s", out)
+	}
+}
+
+func TestView_NoStaleWaitingTextAfterDataArrives(t *testing.T) {
+	// Решение из чата: на скриншоте было видно устаревший текст
+	// "ожидание данных indicators..." одновременно с уже полностью
+	// заполненным виджетом ниже — проверяем, что после получения
+	// snapshot этот текст больше не появляется в View() вообще.
+	m := New("BTC_USDT")
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+	m = updated.(Model)
+
+	msg := wsMsg{Channel: "indicators", Symbol: "BTC_USDT", Data: json.RawMessage(realIndicatorsPayload)}
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+
+	out := m.View()
+	if strings.Contains(out, "ожидание данных indicators") {
+		t.Errorf("View() не должен содержать устаревший плейсхолдер после получения snapshot, получено:\n%s", out)
+	}
+}
+
+func TestView_DoesNotExceedTerminalWidth(t *testing.T) {
+	// Решение из чата: "оранжевая рамка виджета растянута на весь
+	// экран" — vp.Width не учитывал ширину, которую съедает внешняя
+	// рамка+паддинг, из-за чего итоговый вывод превышал ширину
+	// терминала. Проверяем на нескольких реалистичных ширинах, что
+	// ни одна строка View() не шире заданного Width.
+	for _, width := range []int{80, 100, 120, 160} {
+		m := New("BTC_USDT")
+
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		m = updated.(Model)
+
+		msg1 := wsMsg{Channel: "indicators", Symbol: "BTC_USDT", Data: json.RawMessage(realIndicatorsPayload)}
+		updated, _ = m.Update(msg1)
+		m = updated.(Model)
+
+		msg2 := wsMsg{Channel: "orderbook", Symbol: "BTC_USDT", Data: json.RawMessage(realOrderbook20LevelsPayload)}
+		updated, _ = m.Update(msg2)
+		m = updated.(Model)
+
+		out := m.View()
+		for _, line := range strings.Split(out, "\n") {
+			w := lipgloss.Width(line)
+			if w > width {
+				t.Errorf("width=%d: строка шире терминала (%d > %d): %q", width, w, width, line)
+			}
+		}
 	}
 }

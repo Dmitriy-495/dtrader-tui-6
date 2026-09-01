@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -26,7 +27,7 @@ var (
 	colorOK      = lipgloss.Color("82")  // статус OK / direction up
 	colorWarn    = lipgloss.Color("226") // статус WARNING
 	colorSOS     = lipgloss.Color("196") // статус SOS/OFF / direction down
-	colorText    = lipgloss.Color("255") // текст важный
+	colorText    = lipgloss.Color("252") // текст важный — приглушённый светло-серый, решение из чата: "чуть светлее, но не белый" (было 255 — чистый белый)
 	colorData    = lipgloss.Color("214") // текст данные
 	colorMuted   = lipgloss.Color("239") // текст вспомогательный
 	colorNeutral = colorMuted            // direction neutral — своего цвета в разделе 11 нет, берём приглушённый
@@ -57,7 +58,6 @@ type wsStatusMsg ws.Status
 // Model — состояние экрана одного символа.
 type Model struct {
 	symbol string
-	client *ws.Client
 
 	status    ws.Status
 	snapshot  *indicators.Snapshot  // nil, пока ничего не пришло по этому символу
@@ -65,118 +65,220 @@ type Model struct {
 	lastErr   string                // последняя ошибка разбора JSON, если была — не молчим о битых данных
 
 	width, height int
+
+	// vp — прокручиваемая область для тела вкладки (две колонки:
+	// стакан + ТФ-блоки). Решение из чата: контент не помещается по
+	// высоте на обычном терминале (карточки-индикаторы с border-bottom
+	// заметно раздули высоту), а сжатие по высоте решили не делать —
+	// вместо этого прокрутка. Шапка (имя символа, bid/ask) вне vp —
+	// остаётся видна всегда, не должна "уезжать вверх" при скролле,
+	// то, на что и жаловался запрос ("шапка уехала вверх").
+	vp      viewport.Model
+	vpReady bool // true после первого WindowSizeMsg — viewport нельзя использовать до реального размера терминала
 }
 
-// New создаёт модель для одного символа. client уже должен быть
-// запущен (client.Run(ctx) в отдельной горутине) — Model только
-// читает из client.Messages/client.Status, не управляет жизненным
-// циклом соединения.
-func New(symbol string, client *ws.Client) Model {
+// New создаёт модель для одного символа.
+//
+// Не принимает *ws.Client (в отличие от более ранней версии) —
+// решение из чата про архитектуру главного лайаута: при нескольких
+// вкладках (по числу символов) только App (см. app.go) должен читать
+// из client.Messages/client.Status напрямую, рассылая полученные
+// сообщения во все вкладки через их Update(); если бы каждая Model
+// сама слушала общий небуферизованный канал, вкладки конкурировали бы
+// друг с другом за каждое входящее сообщение.
+func New(symbol string) Model {
 	return Model{
 		symbol: symbol,
-		client: client,
 		status: ws.StatusConnecting,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(waitForMessage(m.client), waitForStatus(m.client))
+	// Пустой Init: раньше здесь модель сама слушала client.Messages/
+	// client.Status через waitForMessage/waitForStatus. С появлением
+	// главного лайаута (app.go) вкладок стало несколько (по числу
+	// символов) — если бы каждая Model продолжала сама читать из
+	// ОДНОГО общего (небуферизованного) канала client.Messages,
+	// вкладки конкурировали бы за каждое входящее сообщение: только
+	// одна выиграла бы гонку, остальные вообще не увидели бы свои
+	// данные. Теперь единственный читатель канала — App (см. app.go),
+	// который сам рассылает каждое полученное сообщение во все
+	// активные вкладки через их Update() — как обычный tea.Msg, а не
+	// через отдельное чтение канала внутри каждой вкладки.
+	return nil
 }
 
-// waitForMessage возвращает Cmd, блокирующийся на одном сообщении из
-// client.Messages. bubbletea вызывает Cmd в своей горутине и присылает
-// результат обратно в Update как обычный tea.Msg — так канал из
-// внешнего мира (WS-клиент) превращается в поток bubbletea-сообщений,
-// не блокируя основной Update/View цикл.
-func waitForMessage(client *ws.Client) tea.Cmd {
-	return func() tea.Msg {
-		return wsMsg(<-client.Messages)
-	}
-}
-
-func waitForStatus(client *ws.Client) tea.Cmd {
-	return func() tea.Msg {
-		return wsStatusMsg(<-client.Status)
-	}
-}
+// headerHeight — количество строк, занимаемых шапкой вкладки (имя
+// символа + bid/ask + пустая строка-отступ) плюс верх/низ внешней
+// рамки borderStyle. Используется, чтобы посчитать, сколько высоты
+// терминала реально достаётся под прокручиваемое тело (viewport) —
+// не всю высоту терминала целиком, иначе шапка вытеснялась бы телом
+// или обрезалась.
+//
+// Подобрано под фактическую структуру View(): 2 строки паддинга рамки
+// сверху + 1 строка заголовка + 1 пустая строка + 2 строки паддинга
+// рамки снизу = 6. Не идеальный универсальный расчёт (например
+// удлинится, если m.lastErr показывает ошибку под телом), но
+// достаточен как база — небольшой запас лучше точного попадания.
+const headerHeight = 6
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		vpHeight := m.height - headerHeight
+		if vpHeight < 1 {
+			vpHeight = 1
+		}
+		// vpWidth: вычитаем ширину, которую съедает внешняя рамка
+		// borderStyle (RoundedBorder — по 1 символу слева/справа = 2,
+		// плюс Padding(1,2) — по 2 символа слева/справа = 4). Без
+		// этого vp.Width равнялся полной ширине терминала, а сверху
+		// ещё добавлялась рамка — итоговый вывод превышал ширину
+		// экрана и растягивался/переносился некрасиво (решение из
+		// чата: "оранжевая рамка виджета растянута на весь экран").
+		vpWidth := m.width - 6
+		if vpWidth < 1 {
+			vpWidth = 1
+		}
+		if !m.vpReady {
+			m.vp = viewport.New(vpWidth, vpHeight)
+			m.vpReady = true
+		} else {
+			m.vp.Width = vpWidth
+			m.vp.Height = vpHeight
+		}
+		m.vp.SetContent(m.renderBody())
 		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "ctrl+l":
+			// Решение из чата: сторонний Ctrl+L (стандартная функция
+			// самого терминала "очистить экран") может рассинхронизировать
+			// внутренний кэш строк рендерера bubbletea с тем, что
+			// реально видно в терминале — терминал стирает экран сам,
+			// в обход bubbletea, а рендерер продолжает думать, что
+			// "неизменившиеся" строки (включая рамку) уже на месте, и
+			// пропускает их перерисовку до тех пор, пока их содержимое
+			// реально не изменится хоть на символ. Явно перехватываем
+			// Ctrl+L здесь и просим bubbletea принудительно перерисовать
+			// всё (tea.ClearScreen сбрасывает внутренний кэш строк
+			// рендерера, см. standardRenderer.repaint) — так наша
+			// программа сама управляет полной перерисовкой, а не
+			// полагается на то, что терминал синхронизирует своё
+			// состояние с bubbletea корректно.
+			return m, tea.ClearScreen
+		}
+		// Остальные клавиши (стрелки, PageUp/PageDown, home/end) —
+		// отдаём viewport.Update, он сам знает, какие клавиши двигают
+		// прокрутку (см. bubbles/viewport.DefaultKeyMap).
+		if m.vpReady {
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
 		}
 		return m, nil
 
 	case wsStatusMsg:
 		m.status = ws.Status(msg)
-		// Продолжаем слушать следующий статус — иначе после первого
-		// полученного статуса канал перестал бы читаться, и клиент
-		// (see sendStatus в internal/ws/client.go) начал бы блокироваться
-		// на непрочитанном канале с буфером 1.
-		return m, waitForStatus(m.client)
+		return m, nil
 
 	case wsMsg:
-		cmd := waitForMessage(m.client) // сразу планируем ожидание следующего — та же причина, что и для статуса выше
-
 		if msg.Symbol != m.symbol {
 			// Не наш символ — игнорируем оба интересующих нас канала
-			// (indicators и orderbook), но продолжаем слушать.
-			return m, cmd
+			// (indicators и orderbook).
+			return m, nil
 		}
 
+		changed := false
 		switch msg.Channel {
 		case "indicators":
 			var snap indicators.Snapshot
 			if err := json.Unmarshal(msg.Data, &snap); err != nil {
 				m.lastErr = err.Error()
-				return m, cmd
+				return m, nil
 			}
 			m.snapshot = &snap
 			m.lastErr = ""
+			changed = true
 
 		case "orderbook":
 			var ob indicators.OrderBook
 			if err := json.Unmarshal(msg.Data, &ob); err != nil {
 				m.lastErr = err.Error()
-				return m, cmd
+				return m, nil
 			}
 			m.orderbook = &ob
 			m.lastErr = ""
+			changed = true
 		}
 
-		return m, cmd
+		// Обновляем содержимое viewport при каждом новом snapshot/
+		// orderbook — иначе прокручиваемая область продолжала бы
+		// показывать устаревшие данные несмотря на то, что m.snapshot/
+		// m.orderbook уже обновились. SetContent сбрасывает позицию
+		// прокрутки на верх — компромисс: живые данные важнее, чем
+		// сохранение точной позиции скролла между обновлениями раз в
+		// несколько секунд (см. интервалы pollIndicators/pollOrderBook
+		// в ws-server).
+		if changed && m.vpReady {
+			m.vp.SetContent(m.renderBody())
+		}
+
+		return m, nil
 	}
 
 	return m, nil
 }
 
-func (m Model) View() string {
-	var head strings.Builder
+// renderBody строит содержимое прокручиваемой области (обе колонки:
+// стакан + ТФ-блоки), без шапки — шапка рисуется отдельно в View()
+// и остаётся видна всегда, вне viewport (см. комментарий у поля vp
+// в Model). Вынесено в отдельный метод, потому что нужно в двух
+// местах: при инициализации/ресайзе viewport и при получении новых
+// данных (Update: case wsMsg) — оба раза вызывают m.vp.SetContent(...).
+// scrollIndicator показывает позицию прокрутки (например "▼ 42%") в
+// шапке, когда контент не помещается целиком — сам viewport из bubbles
+// не рисует scrollbar по умолчанию, только реагирует на клавиши, так
+// что без явного индикатора пользователь не может понять, что часть
+// контента скрыта ниже/выше (решение из чата: "полосы прокрутки нет,
+// надо бы предусмотреть").
+//
+// Пустая строка, если весь контент и так помещается (AtTop && AtBottom
+// одновременно) — незачем показывать "100%" там, где скроллить нечего.
+func scrollIndicator(vp viewport.Model) string {
+	if vp.AtTop() && vp.AtBottom() {
+		return ""
+	}
+	pct := int(vp.ScrollPercent() * 100)
+	arrow := "↕"
+	switch {
+	case vp.AtTop():
+		arrow = "▼" // есть куда скроллить только вниз
+	case vp.AtBottom():
+		arrow = "▲" // есть куда скроллить только вверх
+	}
+	return mutedStyle.Render(fmt.Sprintf("%s %d%%", arrow, pct))
+}
 
-	head.WriteString(titleStyle.Render(fmt.Sprintf("  %s  ", m.symbol)))
-	head.WriteString("  ")
-	head.WriteString(bestPricesText(m.orderbook))
-	head.WriteString("\n\n")
-
+func (m Model) renderBody() string {
 	if m.snapshot == nil {
-		head.WriteString(mutedStyle.Render("ожидание данных indicators..."))
+		var b strings.Builder
+		b.WriteString(mutedStyle.Render("ожидание данных indicators..."))
 		if m.lastErr != "" {
-			head.WriteString("\n")
-			head.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора: " + m.lastErr))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора: " + m.lastErr))
 		}
-		return borderStyle.Render(head.String())
+		return b.String()
 	}
 
 	var right strings.Builder
 	right.WriteString(renderPressureBlock(m.snapshot.Pressure))
 	right.WriteString("\n")
-	right.WriteString(blockDividerStyle.Render(strings.Repeat("─", timeframeBlockWidth)))
+	right.WriteString(blockDividerStyle.Render(strings.Repeat("─", indicatorCardWidth+2)))
 	right.WriteString("\n")
 	right.WriteString(renderTimeframeBlocks(*m.snapshot))
 
@@ -189,12 +291,36 @@ func (m Model) View() string {
 	// не нужно вручную считать разницу строк между ними.
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right.String())
 
-	head.WriteString(body)
-
 	if m.lastErr != "" {
-		head.WriteString("\n")
-		head.WriteString(lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора последнего сообщения: " + m.lastErr))
+		body += "\n" + lipgloss.NewStyle().Foreground(colorSOS).Render("ошибка разбора последнего сообщения: "+m.lastErr)
 	}
+
+	return body
+}
+
+func (m Model) View() string {
+	var head strings.Builder
+
+	head.WriteString(titleStyle.Render(fmt.Sprintf("  %s  ", m.symbol)))
+	head.WriteString("  ")
+	head.WriteString(bestPricesText(m.orderbook))
+
+	if m.vpReady {
+		head.WriteString("  ")
+		head.WriteString(scrollIndicator(m.vp))
+	}
+	head.WriteString("\n\n")
+
+	if !m.vpReady {
+		// Первый WindowSizeMsg ещё не пришёл — bubbletea гарантирует,
+		// что он придёт до первого реального взаимодействия, так что
+		// это состояние видно доли секунды на самом старте программы,
+		// не постоянно.
+		head.WriteString(mutedStyle.Render("инициализация..."))
+		return borderStyle.Render(head.String())
+	}
+
+	head.WriteString(m.vp.View())
 
 	return borderStyle.Render(head.String())
 }
@@ -273,14 +399,6 @@ func timeframesToShow(snap indicators.Snapshot) []string {
 	}
 	return ordered
 }
-
-// timeframeBlockWidth — ширина одного ТФ-блока (разделительная линия
-// и общая ширина рамки ориентируются на неё). С добавлением
-// formatNumber (### ###,## — разделители тысяч) и двусторонних
-// шкал (barWidth=15) самая длинная строка — PRESSURE в шапке
-// ("PRESSURE <шкала> 0.518  bid/ask 41 053,00/79 193,00") — пересчитано
-// под неё с запасом на случай ещё больших объёмов.
-const timeframeBlockWidth = 65
 
 var (
 	// blockLabelStyle — лейбл строки внутри блока ("TREND", "ANGLE"...),
@@ -363,31 +481,28 @@ func renderTimeframeBlocks(snap indicators.Snapshot) string {
 		b.WriteString(blockTFHeaderStyle.Render(tf))
 		b.WriteString("\n")
 
-		b.WriteString(blockLabelStyle.Render("TREND"))
-		b.WriteString(directionText(t.Direction))
+		b.WriteString(renderIndicatorCard("TREND", directionText(t.Direction)))
+		b.WriteString("\n\n")
+
+		b.WriteString(renderIndicatorCard("ANGLE", angleBar(t.Angle)))
+		b.WriteString("\n\n")
+
+		b.WriteString(renderIndicatorCard("RSI", dataStyle.Render(fmt.Sprintf("%.1f", t.RSI))))
+		b.WriteString("\n\n")
+
+		b.WriteString(renderIndicatorCard("EMA Δ%", emaSpreadBar(t.EMAFast, t.EMASlow)))
+		b.WriteString("\n\n")
+
+		b.WriteString(renderIndicatorCard("VOL Δ%", volumeDeltaBar(v.BuyVol, v.SellVol, v.Spike)))
 		b.WriteString("\n")
 
-		b.WriteString(blockLabelStyle.Render("ANGLE"))
-		b.WriteString(angleBar(t.Angle))
-		b.WriteString("\n")
-
-		b.WriteString(blockLabelStyle.Render("RSI"))
-		b.WriteString(dataStyle.Render(fmt.Sprintf("%.1f", t.RSI)))
-		b.WriteString("\n")
-
-		b.WriteString(blockLabelStyle.Render("EMA Δ%"))
-		b.WriteString(emaSpreadBar(t.EMAFast, t.EMASlow))
-		b.WriteString("\n")
-
-		b.WriteString(blockLabelStyle.Render("VOL Δ%"))
-		b.WriteString(volumeDeltaBar(v.BuyVol, v.SellVol, v.Spike))
-		b.WriteString("\n")
-
-		// border-bottom: не после последнего блока в ленте — там уже
-		// есть внешняя рамка borderStyle, вторая граница подряд
-		// выглядела бы избыточно.
+		// Разделитель между ТФ-блоками (не между показателями внутри
+		// блока — те теперь просто пустой строкой, решение из чата:
+		// "попробуй убрать бордеры между индикаторами, оставив просто
+		// пустые строки"): не после последнего блока в ленте — там
+		// уже есть внешняя рамка borderStyle.
 		if i < len(tfs)-1 {
-			b.WriteString(blockDividerStyle.Render(strings.Repeat("─", timeframeBlockWidth)))
+			b.WriteString(blockDividerStyle.Render(strings.Repeat("─", indicatorCardWidth+2)))
 			b.WriteString("\n")
 		}
 	}
@@ -395,14 +510,42 @@ func renderTimeframeBlocks(snap indicators.Snapshot) string {
 	return b.String()
 }
 
-// barWidth — количество ячеек двусторонней мини-шкалы (в 3 раза
-// длиннее исходной версии по запросу — "увеличить в три раза длину
-// индикаторов"). Нечётное число — есть единственная центральная
-// ячейка для нуля, шкала визуально симметрична влево/вправо.
-const barWidth = 15
+// renderIndicatorCard рисует один показатель как простую строку
+// "лейбл значение", без рамки вокруг — решение из чата: сначала
+// пробовали полную рамку вокруг каждого индикатора, потом border-
+// bottom-only, в итоге отказались от любых рамок между показателями
+// в пользу пустых строк-разделителей (см. renderTimeframeBlocks) —
+// визуально легче, чем любой вариант с линиями.
+func renderIndicatorCard(label, value string) string {
+	return blockLabelStyle.Render(label) + value
+}
+
+// indicatorCardWidth — видимая ширина самой длинной строки-показателя
+// внутри ТФ-блока (лейбл+шкала+число), используется для расчёта длины
+// разделителя между ТФ-блоками (indicatorCardWidth+2 в
+// renderTimeframeBlocks) — раньше эту роль играла отдельная константа
+// timeframeBlockWidth, рассчитанная под старую раскладку с рамками
+// вокруг каждого индикатора; после отказа от рамок (решение из чата:
+// "убрать бордеры между индикаторами, оставив пустые строки")
+// разделители оказались длиннее реального контента — используем
+// единый источник истины вместо двух рассинхронизирующихся констант.
+//
+// Измерено через lipgloss.Width на реальных строках (не подсчитано
+// на бумаге вручную — такой расчёт для orderbookRowWidth расходился
+// с реальностью ранее в этой же сессии): самая длинная строка
+// (VOL Δ%, например "VOL Δ%   <шкала> +100.0%") даёт 48 видимых
+// символов, +4 запаса.
+const indicatorCardWidth = 52
+
+// barWidth — количество ячеек двусторонней мини-шкалы. Увеличено
+// вдвое от предыдущей версии (15 → ~31) по запросу — "увеличь ширину
+// двухнаправленных шкал индикаторов ещё в два раза". Нечётное число —
+// есть единственная центральная ячейка для нуля, шкала визуально
+// симметрична влево/вправо.
+const barWidth = 31
 
 // barCenter — индекс центральной ячейки (ноль), 0-based.
-const barCenter = barWidth / 2 // 7 при barWidth=15
+const barCenter = barWidth / 2 // 15 при barWidth=31
 
 // bipolarBar рисует двустороннюю шкалу с центром в нуле: отрицательные
 // значения растут влево от центра, положительные — вправо (решение
@@ -430,9 +573,12 @@ func bipolarBar(value, max float64) (cells string, filledRight int, filledLeft i
 	for i := range cellsRunes {
 		cellsRunes[i] = '░'
 	}
-	cellsRunes[barCenter] = '│' // центральная отметка нуля — всегда видна,
-	// даже когда filled==0, чтобы шкала не выглядела как "просто
-	// пустая полоса", а явно показывала, где проходит ноль.
+	cellsRunes[barCenter] = '┆' // центральная отметка нуля — всегда
+	// видна, даже когда filled==0, чтобы шкала не выглядела как
+	// "просто пустая полоса", а явно показывала, где проходит ноль.
+	// '┆' (лёгкая пунктирная), не '│' (сплошная) — решение из чата:
+	// сплошная линия визуально сливалась с соседним закрашенным '█'
+	// в подобие "двойного бордера", выглядело тяжеловесно.
 
 	switch {
 	case filled > 0:
@@ -576,23 +722,23 @@ func directionText(direction string) string {
 
 // renderPressureBlock показывает bid/ask давление как двустороннюю
 // шкалу симметричного процента (bid-ask)/(bid+ask)*100, центр — паритет
-// (bid==ask), влево — давление продавцов, вправо — давление покупателей
-// (замена прежнего коэффициента imbalance=bid/ask на процент — решение
-// привязан ни к одному конкретному таймфрейму), поэтому рисуется
-// отдельным блоком в шапке вкладки, под именем символа/статусом —
-// шкала той же ширины (barWidth), что и остальные индикаторы, не
-// поместилась бы в одну строку с заголовком (решение из чата).
-func renderPressureBlock(p indicators.Pressure) string {
-	// Симметричный процент вместо коэффициента imbalance=bid/ask,
-	// решение из чата: "и в шапке тоже pressure" (в процентах, тем
-	// же принципом, что дельта объёма — (bid-ask)/(bid+ask)*100).
+// (bid==ask), влево — давление продавцов, вправо — давление покупателей.
+// bid/ask объёмы вынесены отдельной строкой ПОД шкалой, центрированы
+// по её ширине (решение из чата: "перенеси bid/ask объёмы под шкалу
+// pressure с выравниванием по центру" — было в одной строке со шкалой
+// и процентом, теперь разнесено на две строки).
+// pressureBar считает и рисует только шкалу+процент давления
+// (bid-ask)/(bid+ask)*100, без подписи "PRESSURE" и без строки
+// bid/ask объёмов — общая часть, переиспользуемая и в
+// renderPressureBlock (вкладка символа, две строки), и в Dashboard
+// (dashboard.go, одна компактная строка в заголовке блока символа).
+func pressureBar(p indicators.Pressure) (bar string, imbalancePct float64) {
 	total := p.BidVol + p.AskVol
-	var imbalancePct float64
 	if total != 0 {
 		imbalancePct = (p.BidVol - p.AskVol) / total * 100
 	}
 
-	bar, right, left := bipolarBar(imbalancePct, volumeDeltaMaxPercent)
+	rawBar, right, left := bipolarBar(imbalancePct, volumeDeltaMaxPercent)
 
 	color := colorNeutral
 	switch {
@@ -602,13 +748,40 @@ func renderPressureBlock(p indicators.Pressure) string {
 		color = colorSOS // ask > bid — давление продавцов
 	}
 
-	return fmt.Sprintf(
-		"%s%s %s  %s %s/%s",
+	return lipgloss.NewStyle().Foreground(color).Render(rawBar), imbalancePct
+}
+
+func renderPressureBlock(p indicators.Pressure) string {
+	bar, imbalancePct := pressureBar(p)
+
+	color := colorNeutral
+	switch {
+	case imbalancePct > 0:
+		color = colorOK
+	case imbalancePct < 0:
+		color = colorSOS
+	}
+
+	line1 := fmt.Sprintf(
+		"%s%s %s",
 		blockLabelStyle.Render("PRESSURE"),
-		lipgloss.NewStyle().Foreground(color).Render(bar),
+		bar,
 		lipgloss.NewStyle().Foreground(color).Bold(true).Render(fmt.Sprintf("%+.1f%%", imbalancePct)),
+	)
+
+	volumesText := fmt.Sprintf(
+		"%s %s/%s",
 		mutedStyle.Render("bid/ask"),
 		dataStyle.Render(formatNumber(p.BidVol)),
 		dataStyle.Render(formatNumber(p.AskVol)),
 	)
+	// Центрируем по ширине лейбла+шкалы (blockLabelStyle.GetWidth()+
+	// barWidth), а не по всей ширине правой колонки — bid/ask должен
+	// визуально центрироваться относительно самой шкалы, которую он
+	// поясняет, а не относительно всего блока, который шире (в нём
+	// есть ещё правая часть под число вроде "-32.5%").
+	pressureLineWidth := blockLabelStyle.GetWidth() + barWidth
+	line2 := lipgloss.NewStyle().Width(pressureLineWidth).Align(lipgloss.Center).Render(volumesText)
+
+	return line1 + "\n" + line2
 }
